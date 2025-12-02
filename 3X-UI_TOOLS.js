@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         3X-UI多功能脚本
 // @namespace    http://tampermonkey.net/
-// @version      1.3
+// @version      1.4
 // @description  3X-UI一键生成节点 (VLESS/VMESS/SS) & 一键关闭订阅访问 & 一键添加出站规则 & 一键配置路由规则 & 一键配删除入站节点
 // @author       Yannick Young
 // @match        *://*/*/panel/*
@@ -595,13 +595,11 @@
 
             const hasIPv4v6 = outbounds.some(o =>
                 o.protocol === "freedom" &&
-                o.tag === "UseIPv4v6" &&
                 o.settings?.domainStrategy === "UseIPv4v6"
             );
 
             const hasIPv6v4 = outbounds.some(o =>
                 o.protocol === "freedom" &&
-                o.tag === "UseIPv6v4" &&
                 o.settings?.domainStrategy === "UseIPv6v4"
             );
 
@@ -620,6 +618,10 @@
 
         let currentRules = [];
         let inbounds = [];
+        let v4Tags = new Set();
+        let v6Tags = new Set();
+        let ipv4v6Tag = '';
+        let ipv6v4Tag = '';
         try {
             const inboundsRes = await fetch(`${getBasePath()}/panel/api/inbounds/list`);
             const inboundsData = await inboundsRes.json();
@@ -634,18 +636,26 @@
             if (!xrayData.success) throw new Error('获取Xray配置失败');
             const obj = JSON.parse(xrayData.obj);
             currentRules = obj.xraySetting.routing?.rules || [];
+            const outbounds = obj.xraySetting.outbounds || [];
+            const ipv4v6Outbound = outbounds.find(o => o.protocol === "freedom" && o.settings?.domainStrategy === "UseIPv4v6");
+            const ipv6v4Outbound = outbounds.find(o => o.protocol === "freedom" && o.settings?.domainStrategy === "UseIPv6v4");
+            if (!ipv4v6Outbound || !ipv6v4Outbound) {
+                toast('无法找到出站规则的 tag，请检查配置', 'error');
+                return;
+            }
+            ipv4v6Tag = ipv4v6Outbound.tag;
+            ipv6v4Tag = ipv6v4Outbound.tag;
+
         } catch (e) {
             toast('获取配置失败: ' + e.message, 'error');
             return;
         }
 
-        const v4Tags = new Set();
-        const v6Tags = new Set();
         currentRules.forEach(r => {
-            if (r.type === "field" && Array.isArray(r.inboundTag) && r.outboundTag === "UseIPv4v6") {
+            if (r.type === "field" && Array.isArray(r.inboundTag) && r.outboundTag === ipv4v6Tag) {
                 r.inboundTag.forEach(t => v4Tags.add(t));
             }
-            if (r.type === "field" && Array.isArray(r.inboundTag) && r.outboundTag === "UseIPv6v4") {
+            if (r.type === "field" && Array.isArray(r.inboundTag) && r.outboundTag === ipv6v4Tag) {
                 r.inboundTag.forEach(t => v6Tags.add(t));
             }
         });
@@ -661,8 +671,8 @@
                 </div>
                 <div class="xp-body" style="padding-bottom:0">
                     <div style="margin-bottom:16px;display:flex;gap:16px;align-items:center">
-                        <label><input type="radio" name="outbound" value="UseIPv4v6" checked> IPv4优先</label>
-                        <label><input type="radio" name="outbound" value="UseIPv6v4"> IPv6优先</label>
+                        <label><input type="radio" name="outbound" value="${ipv4v6Tag}" checked> IPv4优先 (${ipv4v6Tag})</label>
+                        <label><input type="radio" name="outbound" value="${ipv6v4Tag}"> IPv6优先 (${ipv6v4Tag})</label>
                     </div>
                     <div style="margin-bottom:12px;display:flex;align-items:center;justify-content:space-between">
                         <div class="xp-select-all" id="route-select-all">
@@ -681,8 +691,9 @@
 
         const updateItemState = () => {
             const priority = document.querySelector('input[name="outbound"]:checked').value;
-            const blockedSet = priority === "UseIPv4v6" ? v6Tags : v4Tags;
-            const currentSet = priority === "UseIPv4v6" ? v4Tags : v6Tags;
+            const isIPv4Priority = priority === ipv4v6Tag;
+            const blockedSet = isIPv4Priority ? v6Tags : v4Tags;
+            const currentSet = isIPv4Priority ? v4Tags : v6Tags;
 
             list.querySelectorAll('.xp-checkbox').forEach(cb => {
                 const tag = cb.dataset.tag;
@@ -702,14 +713,13 @@
         };
 
         const updateSelectAllState = () => {
-            const priority = document.querySelector('input[name="outbound"]:checked').value;
-            const blocked = priority === "UseIPv4v6" ? v6Tags : v4Tags;
-            const available = Array.from(list.querySelectorAll('.xp-checkbox')).filter(cb => !blocked.has(cb.dataset.tag));
-            const checked = available.filter(cb => cb.classList.contains('checked')).length;
-            const allChecked = available.length > 0 && checked === available.length;
-            const cb = document.getElementById('route-select-all-cb');
-            cb.classList.toggle('checked', allChecked);
-            cb.innerHTML = allChecked ? SVG_ICONS.check : '';
+            const allCheckboxes = Array.from(list.querySelectorAll('.xp-checkbox'));
+            const availableCheckboxes = allCheckboxes.filter(cb => !cb.classList.contains('disabled'));
+            const checkedCheckboxes = availableCheckboxes.filter(cb => cb.classList.contains('checked'));
+            const isAllChecked = availableCheckboxes.length > 0 && checkedCheckboxes.length === availableCheckboxes.length;
+            const selectAllCb = document.getElementById('route-select-all-cb');
+            selectAllCb.classList.toggle('checked', isAllChecked);
+            selectAllCb.innerHTML = isAllChecked ? SVG_ICONS.check : '';
         };
 
         list.innerHTML = inbounds.length ? inbounds.map(item => {
@@ -743,11 +753,9 @@
         };
 
         document.getElementById('route-select-all').onclick = () => {
-            const priority = document.querySelector('input[name="outbound"]:checked').value;
-            const blocked = priority === "UseIPv4v6" ? v6Tags : v4Tags;
             const shouldCheck = !document.getElementById('route-select-all-cb').classList.contains('checked');
             list.querySelectorAll('.xp-checkbox').forEach(cb => {
-                if (!blocked.has(cb.dataset.tag)) {
+                if (!cb.classList.contains('disabled')) {
                     cb.classList.toggle('checked', shouldCheck);
                     cb.innerHTML = shouldCheck ? SVG_ICONS.check : '';
                 }
@@ -768,9 +776,8 @@
 
                 cfg.routing.rules = cfg.routing.rules.filter(r => {
                     if (r.type !== "field") return true;
-                    if (!["UseIPv4v6", "UseIPv6v4"].includes(r.outboundTag)) return true;
-                    return r.outboundTag !== priority;
-                });
+                    if (![ipv4v6Tag, ipv6v4Tag].includes(r.outboundTag)) return true;
+                    return r.outboundTag !== priority; });
 
                 if (selected.length > 0) {
                     cfg.routing.rules.push({
