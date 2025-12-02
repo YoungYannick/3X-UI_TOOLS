@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         3X-UI多功能脚本
 // @namespace    http://tampermonkey.net/
-// @version      1.1
-// @description  3X-UI一键生成节点 (VLESS/VMESS) & 一键关闭订阅访问 & 一键添加出站规则 & 一键配置路由规则
+// @version      1.3
+// @description  3X-UI一键生成节点 (VLESS/VMESS/SS) & 一键关闭订阅访问 & 一键添加出站规则 & 一键配置路由规则 & 一键配删除入站节点
 // @author       Yannick Young
 // @match        *://*/*/panel/*
 // @grant        none
@@ -65,10 +65,19 @@
             #xui-float-btn{position:fixed;top:20px;right:20px;width:50px;height:50px;background:#1f2937;border-radius:50%;color:white;display:flex;align-items:center;justify-content:center;cursor:move;box-shadow:0 4px 15px rgba(0,0,0,0.3);z-index:9998;transition:transform .2s,background .2s;user-select:none}
             #xui-float-btn:hover{background:#000;transform:scale(1.05)}
             #xui-float-btn:active{transform:scale(0.95)}
-            #xui-backdrop,#xui-route-backdrop{position:fixed;inset:0;background:rgba(0,0,0,0.7);backdrop-filter:blur(4px);z-index:9999;display:none;justify-content:center;align-items:center;animation:fadeIn .3s ease}
+            #xui-backdrop,#xui-route-backdrop,#xui-delete-backdrop{position:fixed;inset:0;background:rgba(0,0,0,0.7);backdrop-filter:blur(4px);z-index:9999;display:none;justify-content:center;align-items:center;animation:fadeIn .4s ease-in-out}
             @keyframes fadeIn{from{opacity:0}to{opacity:1}}
-            #xui-panel,#xui-route-panel{background:#fff;width:700px;max-height:90vh;overflow-y:auto;border-radius:12px;box-shadow:0 25px 50px rgba(0,0,0,0.4);animation:slideUp .4s cubic-bezier(.34,1.56,.64,1);border:1px solid #e5e7eb}
-            @keyframes slideUp{from{transform:translateY(50px) scale(0.95);opacity:0}to{transform:translateY(0) scale(1);opacity:1}}
+            #xui-panel,#xui-route-panel,#xui-delete-panel{background:#fff;width:900px;max-height:90vh;overflow-y:auto;border-radius:12px;box-shadow:0 25px 50px rgba(0,0,0,0.4);animation:slideUp .4s cubic-bezier(.34,1.56,.64,1);border:1px solid #e5e7eb}
+            #xui-confirm-backdrop{position:fixed;inset:0;background:rgba(0,0,0,0.7);backdrop-filter:blur(4px);z-index:10001;display:none;justify-content:center;align-items:center;animation:fadeIn .4s ease-in-out}
+            .xp-confirm-panel{background:#fff;width:400px;padding:20px;border-radius:12px;box-shadow:0 25px 50px rgba(0,0,0,0.4);animation:slideUp .4s cubic-bezier(.34,1.56,.64,1);border:1px solid #e5e7eb;text-align:center}
+            .xp-confirm-title{font-size:18px;font-weight:700;color:#1f2937;margin-bottom:12px}
+            .xp-confirm-content{font-size:14px;color:#4b5563;margin-bottom:20px}
+            .xp-confirm-btns{display:flex;justify-content:center;gap:12px}
+            .xp-confirm-yes{background:#ef4444;color:white;padding:10px 20px;border:none;border-radius:8px;font-size:14px;cursor:pointer;transition:all .2s}
+            .xp-confirm-yes:hover{background:#dc2626}
+            .xp-confirm-no{background:#6b7280;color:white;padding:10px 20px;border:none;border-radius:8px;font-size:14px;cursor:pointer;transition:all .2s}
+            .xp-confirm-no:hover{background:#4b5563}
+            @keyframes slideUp{from{transform:translateY(30px) scale(0.95);opacity:0}to{transform:translateY(0) scale(1);opacity:1}}
             .xp-header{background:#f9fafb;padding:20px 24px;color:#1f2937;position:relative;border-bottom:1px solid #e5e7eb}
             .xp-title{font-size:18px;font-weight:700}
             .xp-subtitle{font-size:13px;color:#6b7280;margin-top:4px}
@@ -219,6 +228,12 @@
         return result;
     }
 
+    function randomBase64(length) {
+        const bytes = new Uint8Array(length);
+        window.crypto.getRandomValues(bytes);
+        return btoa(String.fromCharCode.apply(null, bytes));
+    }
+
     async function getPanelSettings() {
         try {
             const res = await fetch(`${getBasePath()}/panel/setting/all`, { method: 'POST' });
@@ -238,7 +253,10 @@
         'vless_ws': 'VLESS_WS',
         'vless_ws_tls': 'VLESS_WS_TLS',
         'vmess_ws': 'VMESS_WS',
-        'vmess_ws_tls': 'VMESS_WS_TLS'
+        'vmess_ws_tls': 'VMESS_WS_TLS',
+        'ss_blake3_chacha20_poly1305': 'SS_TCP_2022_BLAKE3_CHACHA20_POLY1305',
+        'ss_blake3_aes_256_gcm': 'SS_TCP_2022_BLAKE3_AES_256_GCM',
+        'ss_blake3_aes_128_gcm': 'SS_TCP_2022_BLAKE3_AES_128_GCM'
     };
 
     async function createNode(type) {
@@ -261,7 +279,7 @@
         const email = randomLowerAndNum(8);
         const subId = randomLowerAndNum(16);
 
-        const fullName = PROTOCOL_FULL_NAMES[type] || type.toUpperCase();
+        let fullName = PROTOCOL_FULL_NAMES[type] || type.toUpperCase();
         const tag = `${fullName}-${port}`;
 
         const isTls = type.endsWith('_tls');
@@ -387,13 +405,53 @@
                     }
                 };
             }
+        } else if (type.startsWith('ss_')) {
+            protocol = "shadowsocks";
+            const method = '2022-' + type.replace('ss_', '').replace(/_/g, '-');
+            let keyLength;
+            if (method.includes('aes-128')) keyLength = 16;
+            else keyLength = 32;
+            const password = randomBase64(keyLength);
+            let clients = [];
+            if (method.includes('aes-')) {
+                const clientPassword = randomBase64(keyLength);
+                clients = [{
+                    password: clientPassword,
+                    email: email,
+                    subId: subId,
+                    limitIp: 0,
+                    totalGB: 0,
+                    expiryTime: 0,
+                    enable: true,
+                    tgId: "",
+                    comment: "",
+                    reset: 0
+                }];
+            }
+            settings = JSON.stringify({
+                method: method,
+                password: password,
+                network: "tcp,udp",
+                clients: clients,
+                ivCheck: false
+            });
+            stream = {
+                network: "tcp",
+                security: "none",
+                externalProxy: [],
+                tcpSettings: {
+                    acceptProxyProtocol: false,
+                    header: { type: "none" }
+                }
+            };
+            fullName = PROTOCOL_FULL_NAMES[type];
         } else {
             toast(`不支持的协议类型: ${type}`, 'error');
             return false;
         }
 
         const payload = {
-            up: 0, down: 0, total: 0, remark: tag, enable: true, expiryTime: 0,
+            up: 0, down: 0, total: 0, remark: fullName, enable: true, expiryTime: 0,
             trafficReset: "never", lastTrafficResetTime: 0, listen: "", port: port,
             protocol: protocol, settings: settings,
             streamSettings: JSON.stringify(stream),
@@ -408,13 +466,13 @@
             });
             const data = await res.json();
             if (data.success) {
-                toast(`节点创建成功! ${tag}`, 'success');
+                toast(`节点创建成功! ${fullName}`, 'success');
                 return true;
             } else {
                 throw new Error(data.msg);
             }
         } catch (e) {
-            toast(`${tag} 创建失败: ${e.message}`, 'error');
+            toast(`${fullName} 创建失败: ${e.message}`, 'error');
             return false;
         }
     }
@@ -746,6 +804,131 @@
         updateItemState();
     }
 
+    async function openBatchDelete() {
+        let nodes = [];
+        try {
+            const res = await fetch(`${getBasePath()}/panel/api/inbounds/list`);
+            const data = await res.json();
+            if (!data.success) throw new Error("获取节点列表失败");
+            nodes = data.obj.map(item => ({
+                id: item.id,
+                remark: item.remark,
+                port: item.port,
+                protocol: item.protocol.toUpperCase()
+            }));
+        } catch (e) {
+            toast('获取节点失败: ' + e.message, 'error');
+            return;
+        }
+
+        const backdrop = document.createElement('div');
+        backdrop.id = 'xui-delete-backdrop';
+        backdrop.innerHTML = `
+            <div id="xui-delete-panel">
+                <div class="xp-header">
+                    <div class="xp-title">批量删除节点</div>
+                    <div class="xp-subtitle">选择节点进行批量删除</div>
+                    <div class="xp-close" id="delete-close">${SVG_ICONS.close}</div>
+                </div>
+                <div class="xp-body" style="padding-bottom:0">
+                    <div style="margin-bottom:12px;display:flex;align-items:center;justify-content:space-between">
+                        <div class="xp-select-all" id="delete-select-all">
+                            <div class="xp-checkbox checked" id="delete-select-all-cb" style="margin-right:8px">${SVG_ICONS.check}</div>全选
+                        </div>
+                        <button class="xp-danger-btn" id="delete-apply-btn" style="background:#ef4444;color:white;padding:10px 20px;border-radius:8px;">删除选中</button>
+                    </div>
+                    <div id="delete-nodes-list" style="max-height:420px;overflow-y:auto;border:1px solid #eee;border-radius:8px"></div>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(backdrop);
+        backdrop.style.display = 'flex';
+
+        const list = document.getElementById('delete-nodes-list');
+        list.innerHTML = nodes.length ? nodes.map(item => `
+            <div class="route-item">
+                <div class="xp-checkbox" data-id="${item.id}"></div>
+                <span class="route-tag">${item.remark}</span>
+                <span class="route-remark" style="color: #6b7280; font-size: 12px; margin-left: auto;margin-right: 120px;">端口: ${item.port} | 类型: ${item.protocol}</span>
+            </div>
+        `).join('') : '<div style="text-align:center;color:#999;padding:30px">暂无节点</div>';
+
+        document.getElementById('delete-close').onclick = () => backdrop.remove();
+        backdrop.onclick = e => { if (e.target === backdrop) backdrop.remove(); };
+
+        list.onclick = e => {
+            const cb = e.target.closest('.xp-checkbox');
+            if (!cb) return;
+            cb.classList.toggle('checked');
+            cb.innerHTML = cb.classList.contains('checked') ? SVG_ICONS.check : '';
+            updateDeleteSelectAllState();
+        };
+
+        const updateDeleteSelectAllState = () => {
+            const available = Array.from(list.querySelectorAll('.xp-checkbox'));
+            const checked = available.filter(cb => cb.classList.contains('checked')).length;
+            const allChecked = available.length > 0 && checked === available.length;
+            const cb = document.getElementById('delete-select-all-cb');
+            cb.classList.toggle('checked', allChecked);
+            cb.innerHTML = allChecked ? SVG_ICONS.check : '';
+        };
+
+        document.getElementById('delete-select-all').onclick = () => {
+            const shouldCheck = !document.getElementById('delete-select-all-cb').classList.contains('checked');
+            list.querySelectorAll('.xp-checkbox').forEach(cb => {
+                cb.classList.toggle('checked', shouldCheck);
+                cb.innerHTML = shouldCheck ? SVG_ICONS.check : '';
+            });
+            updateDeleteSelectAllState();
+        };
+
+        document.getElementById('delete-apply-btn').onclick = async () => {
+            const selected = Array.from(list.querySelectorAll('.xp-checkbox.checked')).map(cb => cb.dataset.id);
+            if (selected.length === 0) {
+                toast('请选择至少一个节点', 'error');
+                return;
+            }
+            const confirmBackdrop = document.createElement('div');
+            confirmBackdrop.id = 'xui-confirm-backdrop';
+            confirmBackdrop.innerHTML = `
+                <div class="xp-confirm-panel">
+                    <div class="xp-confirm-title">确认删除</div>
+                    <div class="xp-confirm-content">确认删除 ${selected.length} 个选中节点?</div>
+                    <div class="xp-confirm-btns">
+                        <button id="confirm-yes" class="xp-confirm-yes">是</button>
+                        <button id="confirm-no" class="xp-confirm-no">否</button>
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(confirmBackdrop);
+            confirmBackdrop.style.display = 'flex';
+            document.getElementById('confirm-no').onclick = () => confirmBackdrop.remove();
+            document.getElementById('confirm-yes').onclick = async () => {
+                confirmBackdrop.remove();
+                let successCount = 0;
+                for (const id of selected) {
+                    try {
+                        const res = await fetch(`${getBasePath()}/panel/api/inbounds/del/${id}`, { method: 'POST' });
+                        const data = await res.json();
+                        if (data.success) successCount++;
+                    } catch (e) {
+                        toast(`删除节点 ${id} 失败: ${e.message}`, 'error');
+                    }
+                }
+                toast(`成功删除 ${successCount} 个节点`, 'success');
+                if (successCount > 0) {
+                    const restartRes = await fetch(`${getBasePath()}/panel/api/server/restartXrayService`, { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+                    const restartData = await restartRes.json();
+                    if (restartData.success) {
+                        setTimeout(() => { backdrop.remove(); location.reload(); }, 2000);
+                    }
+                }
+            };
+        };
+
+        updateDeleteSelectAllState();
+    }
+
     async function createSelectedNodes() {
         const selectedProtocols = Array.from(document.querySelectorAll('#xp-protocols-view .xp-checkbox.checked[data-protocol]')).map(cb => cb.dataset.protocol);
         if (selectedProtocols.length === 0) {
@@ -846,7 +1029,7 @@
     function showProtocolsView() {
         document.getElementById('xp-protocols-view').style.display = 'block';
         document.getElementById('xp-config-view').style.display = 'none';
-        updateHeader('3X-UI多功能脚本', '一键生成节点 (VLESS/VMESS) & 一键关闭订阅访问 & 一键添加出站规则 & 一键配置路由规则');
+        updateHeader('3X-UI多功能脚本', '一键生成节点 (VLESS/VMESS/SS) & 一键关闭订阅访问 & 一键添加出站规则 & 一键配置路由规则 & 一键配删除入站节点');
         document.getElementById('xp-footer').innerHTML = `
             <div class="xp-select-all" id="xp-select-all-btn">
                 <div class="xp-checkbox checked" id="xp-select-all-cb" style="margin-right: 8px;">${SVG_ICONS.check}</div>
@@ -856,6 +1039,7 @@
                 <button class="xp-danger-btn" id="xp-disable-sub-btn">${SVG_ICONS.shieldOff} 关闭订阅</button>
                 <button class="xp-action-btn" id="xp-add-outbound-btn">${SVG_ICONS.plus} 添加出站</button>
                 <button class="xp-action-btn" id="xp-route-config-btn">${SVG_ICONS.route} 路由规则</button>
+                <button class="xp-danger-btn" id="xp-batch-delete-btn">${SVG_ICONS.close} 批量删除</button>
                 <a class="xp-footer-link" id="xp-go-config-btn">${SVG_ICONS.settings} 配置</a>
                 <button class="xp-create-btn-main" id="xp-create-btn-main">一键创建选中节点</button>
             </div>
@@ -886,6 +1070,7 @@
         document.getElementById('xp-disable-sub-btn').onclick = disableSubscription;
         document.getElementById('xp-add-outbound-btn').onclick = addOutboundRules;
         document.getElementById('xp-route-config-btn').onclick = openRoutingConfig;
+        document.getElementById('xp-batch-delete-btn').onclick = openBatchDelete;
 
         document.querySelectorAll('#xp-protocols-view .xp-toggle-btn').forEach(btn => {
             btn.onclick = (e) => { e.stopPropagation(); toggleInfo(btn.id.replace('toggle-', '')); };
@@ -988,6 +1173,27 @@
                         <div class="xp-protocol-actions">${renderCheckbox('vmess_ws_tls', tlsDisabled ? false : true, tlsDisabled)}<button class="xp-toggle-btn" id="toggle-vmess_ws_tls">${SVG_ICONS.toggle}</button></div>
                     </div>
                     <div class="xp-info-panel" id="info-vmess_ws_tls"><div class="xp-info-content"><div class="xp-info-title">配置详情</div><div class="xp-info-list"><div class="xp-info-item">传输: WS</div><div class="xp-info-item">安全: tls</div></div></div></div>
+                </div>
+                <div class="xp-protocol-item selected" data-protocol="ss_blake3_chacha20_poly1305">
+                    <div class="xp-protocol-header">
+                        <div class="xp-protocol-main"><div class="xp-protocol-icon">${SVG_ICONS.ladder}</div><div class="xp-protocol-name">SHADOWSOCKS TCP (2022-BLAKE3-CHACHA20-POLY1305)</div></div>
+                        <div class="xp-protocol-actions">${renderCheckbox('ss_blake3_chacha20_poly1305', true)}<button class="xp-toggle-btn" id="toggle-ss_blake3_chacha20_poly1305">${SVG_ICONS.toggle}</button></div>
+                    </div>
+                    <div class="xp-info-panel" id="info-ss_blake3_chacha20_poly1305"><div class="xp-info-content"><div class="xp-info-title">配置详情</div><div class="xp-info-list"><div class="xp-info-item">网络: tcp,udp</div><div class="xp-info-item">加密: 2022-blake3-chacha20-poly1305</div></div></div></div>
+                </div>
+                <div class="xp-protocol-item selected" data-protocol="ss_blake3_aes_256_gcm">
+                    <div class="xp-protocol-header">
+                        <div class="xp-protocol-main"><div class="xp-protocol-icon">${SVG_ICONS.ladder}</div><div class="xp-protocol-name">SHADOWSOCKS TCP (2022-BLAKE3-AES-256-GCM)</div></div>
+                        <div class="xp-protocol-actions">${renderCheckbox('ss_blake3_aes_256_gcm', true)}<button class="xp-toggle-btn" id="toggle-ss_blake3_aes_256_gcm">${SVG_ICONS.toggle}</button></div>
+                    </div>
+                    <div class="xp-info-panel" id="info-ss_blake3_aes_256_gcm"><div class="xp-info-content"><div class="xp-info-title">配置详情</div><div class="xp-info-list"><div class="xp-info-item">网络: tcp,udp</div><div class="xp-info-item">加密: 2022-blake3-aes-256-gcm</div></div></div></div>
+                </div>
+                <div class="xp-protocol-item selected" data-protocol="ss_blake3_aes_128_gcm">
+                    <div class="xp-protocol-header">
+                        <div class="xp-protocol-main"><div class="xp-protocol-icon">${SVG_ICONS.ladder}</div><div class="xp-protocol-name">SHADOWSOCKS TCP (2022-BLAKE3-AES-128-GCM)</div></div>
+                        <div class="xp-protocol-actions">${renderCheckbox('ss_blake3_aes_128_gcm', true)}<button class="xp-toggle-btn" id="toggle-ss_blake3_aes_128_gcm">${SVG_ICONS.toggle}</button></div>
+                    </div>
+                    <div class="xp-info-panel" id="info-ss_blake3_aes_128_gcm"><div class="xp-info-content"><div class="xp-info-title">配置详情</div><div class="xp-info-list"><div class="xp-info-item">网络: tcp,udp</div><div class="xp-info-item">加密: 2022-blake3-aes-128-gcm</div></div></div></div>
                 </div>
             </div>
         `;
