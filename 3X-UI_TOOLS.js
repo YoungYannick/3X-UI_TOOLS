@@ -784,7 +784,7 @@
             .route-item:last-child{border-bottom:none}
             .route-tag{background:#e5e7eb;color:#1f2937;padding:3px 9px;border-radius:6px;font-size:12px;font-family:SF Mono,Menlo,Monaco,Consolas,monospace;font-weight:600;letter-spacing:0.5px}
             .route-hint{font-size:11px;color:#9ca3af;position:absolute;right:12px;top:50%;transform:translateY(-50%)}
-            .route-remark{margin-left:auto;color:#6b7280;font-size:12px}
+            .route-remark{margin-left:auto;margin-right:280px;color:#6b7280;font-size:12px}
             .node-result-item{margin-bottom:20px;border:1px solid #e5e7eb;border-radius:8px;padding:16px}
             .node-info-row{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
             .node-name{font-weight:700;color:#1f2937}
