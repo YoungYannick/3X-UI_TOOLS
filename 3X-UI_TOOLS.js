@@ -1,8 +1,9 @@
 // ==UserScript==
 // @name         3X-UI多功能脚本
 // @namespace    http://tampermonkey.net/
-// @version      1.4
-// @description  3X-UI一键生成节点 (VLESS/VMESS/SS) & 一键关闭订阅访问 & 一键添加出站规则 & 一键配置路由规则 & 一键配删除入站节点
+// @version      1.6
+// @description  3X-UI一键生成节点 (VLESS/VMESS/SS) & 一键关闭订阅访问 & 一键添加出站规则 & 一键配置路由规则 & 一键配删除入站节点 & 节点链接展示
+// @icon         https://avatars.githubusercontent.com/u/86963023
 // @author       Yannick Young
 // @match        *://*/*/panel/*
 // @grant        none
@@ -10,6 +11,651 @@
 
 (function() {
     'use strict';
+
+    class NodeGenerator {
+      constructor(options = {}) {
+        this.address = options.address || '';
+        this.showInfo = options.showInfo !== false;
+        this.remarkModel = options.remarkModel || '-ieo';
+      }
+
+      generateLinks(inbound, address) {
+        this.address = address || this.address;
+        const links = [];
+        try {
+          const settings = JSON.parse(inbound.settings);
+          const streamSettings = JSON.parse(inbound.streamSettings);
+          const clients = settings.clients || [];
+          if (inbound.protocol === 'shadowsocks' && clients.length === 0) {
+            const method = settings.method || '';
+            if (method.startsWith('2022-')) {
+              const virtualClient = {
+                enable: true,
+                email: inbound.remark || `SS-${inbound.port}`,
+                password: settings.password || ''
+              };
+              const link = this.getLink(inbound, virtualClient, streamSettings);
+              if (link) {
+                links.push(link);
+              }
+            }
+          } else {
+            clients.forEach(client => {
+              if (client.enable) {
+                const link = this.getLink(inbound, client, streamSettings);
+                if (link) {
+                  links.push(link);
+                }
+              }
+            });
+          }
+        } catch (error) {
+          console.error('生成链接失败:', error);
+        }
+        return links;
+      }
+
+      getLink(inbound, client, streamSettings) {
+        switch (inbound.protocol) {
+          case 'vmess':
+            return this.genVmessLink(inbound, client, streamSettings);
+          case 'vless':
+            return this.genVlessLink(inbound, client, streamSettings);
+          case 'trojan':
+            return this.genTrojanLink(inbound, client, streamSettings);
+          case 'shadowsocks':
+            return this.genShadowsocksLink(inbound, client, streamSettings);
+          default:
+            return '';
+        }
+      }
+
+      genVlessLink(inbound, client, stream) {
+        const address = this.address;
+        const port = inbound.port;
+        const uuid = client.id;
+        const streamNetwork = stream.network || 'tcp';
+        const params = new URLSearchParams();
+        params.set('type', streamNetwork);
+        const settings = JSON.parse(inbound.settings);
+        if (settings.encryption) {
+          params.set('encryption', settings.encryption);
+        }
+        this.handleStreamSettings(stream, streamNetwork, params);
+        this.handleSecurity(stream, params, client.flow);
+        const externalProxies = stream.externalProxy || [];
+        if (externalProxies.length > 0) {
+          return this.genMultipleLinks('vless', uuid, externalProxies, params, inbound, client.email, stream, client.flow);
+        }
+        let link = `vless://${uuid}@${address}:${port}`;
+        const url = new URL(link);
+        params.forEach((value, key) => {
+          url.searchParams.set(key, value);
+        });
+        url.hash = this.genRemark(inbound, client.email, '');
+        return url.toString();
+      }
+
+      genVmessLink(inbound, client, stream) {
+        const externalProxies = stream.externalProxy || [];
+        if (externalProxies.length > 0) {
+          return this.genVmessMultipleLinks(obj, externalProxies, inbound, client.email, security);
+        }
+        const obj = {
+          v: '2',
+          ps: this.genRemark(inbound, client.email, ''),
+          add: this.address,
+          port: inbound.port,
+          id: client.id,
+          scy: client.security || ''
+        };
+        const streamNetwork = stream.network || 'tcp';
+        obj.net = streamNetwork;
+        const security = stream.security || 'none';
+        obj.tls = security;
+        switch (streamNetwork) {
+          case 'tcp':
+            this.handleVmessTcp(stream, obj);
+            break;
+          case 'kcp':
+            this.handleVmessKcp(stream, obj);
+            break;
+          case 'ws':
+            this.handleVmessWs(stream, obj);
+            break;
+          case 'grpc':
+            this.handleVmessGrpc(stream, obj);
+            break;
+          case 'httpupgrade':
+            this.handleVmessHttpUpgrade(stream, obj);
+            break;
+          case 'xhttp':
+            this.handleVmessXhttp(stream, obj);
+            break;
+        }
+        if (security === 'tls') {
+          this.handleVmessTls(stream, obj);
+        }
+        const jsonStr = JSON.stringify(obj, null, 2);
+        return 'vmess://' + btoa(jsonStr);
+      }
+
+      genTrojanLink(inbound, client, stream) {
+        const address = this.address;
+        const port = inbound.port;
+        const password = client.password;
+        const streamNetwork = stream.network || 'tcp';
+        const params = new URLSearchParams();
+        params.set('type', streamNetwork);
+        this.handleStreamSettings(stream, streamNetwork, params);
+        this.handleSecurity(stream, params, client.flow);
+        const externalProxies = stream.externalProxy || [];
+        if (externalProxies.length > 0) {
+          return this.genMultipleLinks('trojan', password, externalProxies, params, inbound, client.email, stream, client.flow);
+        }
+        let link = `trojan://${password}@${address}:${port}`;
+        const url = new URL(link);
+        params.forEach((value, key) => {
+          url.searchParams.set(key, value);
+        });
+        url.hash = this.genRemark(inbound, client.email, '');
+        return url.toString();
+      }
+
+      genShadowsocksLink(inbound, client, stream) {
+        const address = this.address;
+        const port = inbound.port;
+        const settings = JSON.parse(inbound.settings);
+        const method = settings.method;
+        const inboundPassword = settings.password || '';
+        let encPart = `${method}:${client.password}`;
+        if (method && method.startsWith('2022-')) {
+          if (client.password === inboundPassword) {
+            encPart = `${method}:${inboundPassword}`;
+          } else {
+            encPart = `${method}:${inboundPassword}:${client.password}`;
+          }
+        }
+        const streamNetwork = stream.network || 'tcp';
+        const params = new URLSearchParams();
+        params.set('type', streamNetwork);
+        this.handleStreamSettings(stream, streamNetwork, params);
+        const security = stream.security || 'none';
+        if (security === 'tls') {
+          this.handleTlsParams(stream, params);
+        }
+        const externalProxies = stream.externalProxy || [];
+        if (externalProxies.length > 0) {
+          return this.genSsMultipleLinks(encPart, externalProxies, params, inbound, client.email, security, stream);
+        }
+        const encodedPart = btoa(encPart).replace(/=+$/, '');
+        let link = `ss://${encodedPart}@${address}:${port}`;
+        const url = new URL(link);
+        params.forEach((value, key) => {
+          url.searchParams.set(key, value);
+        });
+        url.hash = this.genRemark(inbound, client.email, '');
+        return url.toString();
+      }
+
+      handleStreamSettings(stream, streamNetwork, params) {
+        switch (streamNetwork) {
+          case 'tcp':
+            this.handleTcp(stream, params);
+            break;
+          case 'kcp':
+            this.handleKcp(stream, params);
+            break;
+          case 'ws':
+            this.handleWs(stream, params);
+            break;
+          case 'grpc':
+            this.handleGrpc(stream, params);
+            break;
+          case 'httpupgrade':
+            this.handleHttpUpgrade(stream, params);
+            break;
+          case 'xhttp':
+            this.handleXhttp(stream, params);
+            break;
+        }
+      }
+
+      handleTcp(stream, params) {
+        const tcp = stream.tcpSettings || {};
+        const header = tcp.header || {};
+        const typeStr = header.type || 'none';
+        if (typeStr === 'http') {
+          const request = header.request || {};
+          const requestPath = request.path || [];
+          if (requestPath.length > 0) {
+            params.set('path', requestPath[0]);
+          }
+          const headers = request.headers || {};
+          const host = this.searchHost(headers);
+          if (host) {
+            params.set('host', host);
+          }
+          params.set('headerType', 'http');
+        }
+      }
+
+      handleKcp(stream, params) {
+        const kcp = stream.kcpSettings || {};
+        const header = kcp.header || {};
+        if (header.type) {
+          params.set('headerType', header.type);
+        }
+        if (kcp.seed) {
+          params.set('seed', kcp.seed);
+        }
+      }
+
+      handleWs(stream, params) {
+        const ws = stream.wsSettings || {};
+        if (ws.path) {
+          params.set('path', ws.path);
+        }
+        if (ws.host) {
+          params.set('host', ws.host);
+        } else {
+          const headers = ws.headers || {};
+          const host = this.searchHost(headers);
+          params.set('host', host || '');
+        }
+      }
+
+      handleGrpc(stream, params) {
+        const grpc = stream.grpcSettings || {};
+        if (grpc.serviceName) {
+          params.set('serviceName', grpc.serviceName);
+        }
+        if (grpc.authority) {
+          params.set('authority', grpc.authority);
+        }
+        if (grpc.multiMode) {
+          params.set('mode', 'multi');
+        }
+      }
+
+      handleHttpUpgrade(stream, params) {
+        const httpupgrade = stream.httpupgradeSettings || {};
+        if (httpupgrade.path) {
+          params.set('path', httpupgrade.path);
+        }
+        if (httpupgrade.host) {
+          params.set('host', httpupgrade.host);
+        } else {
+          const headers = httpupgrade.headers || {};
+          const host = this.searchHost(headers);
+          if (host) {
+            params.set('host', host);
+          }
+        }
+      }
+
+      handleXhttp(stream, params) {
+        const xhttp = stream.xhttpSettings || {};
+        if (xhttp.path) {
+          params.set('path', xhttp.path);
+        }
+        if (xhttp.host) {
+          params.set('host', xhttp.host);
+        } else {
+          const headers = xhttp.headers || {};
+          const host = this.searchHost(headers);
+          params.set('host', host || '');
+        }
+        params.set('mode', xhttp.mode || 'auto');
+      }
+
+      handleSecurity(stream, params, flow) {
+        const security = stream.security || 'none';
+        if (security === 'tls') {
+          params.set('security', 'tls');
+          this.handleTlsParams(stream, params);
+          if (flow && stream.network === 'tcp') {
+            params.set('flow', flow);
+          }
+        } else if (security === 'reality') {
+          params.set('security', 'reality');
+          this.handleRealityParams(stream, params);
+          if (flow && stream.network === 'tcp') {
+            params.set('flow', flow);
+          }
+        } else {
+          params.set('security', 'none');
+        }
+      }
+
+      handleTlsParams(stream, params) {
+        const tlsSetting = stream.tlsSettings || {};
+        const alpns = tlsSetting.alpn || [];
+        if (alpns.length > 0) {
+          params.set('alpn', alpns.join(','));
+        }
+        if (tlsSetting.serverName) {
+          params.set('sni', tlsSetting.serverName);
+        }
+        const settings = tlsSetting.settings || {};
+        if (settings.fingerprint) {
+          params.set('fp', settings.fingerprint);
+        }
+        if (settings.allowInsecure) {
+          params.set('allowInsecure', '1');
+        }
+      }
+
+      handleRealityParams(stream, params) {
+        const realitySetting = stream.realitySettings || {};
+        const settings = realitySetting.settings || {};
+        if (settings.publicKey) {
+          params.set('pbk', settings.publicKey);
+        }
+        if (settings.fingerprint) {
+          params.set('fp', settings.fingerprint);
+        }
+        const serverNames = realitySetting.serverNames || [];
+        if (serverNames.length > 0) {
+          params.set('sni', serverNames[Math.floor(Math.random() * serverNames.length)]);
+        }
+        const rawShortIds = realitySetting.shortIds || [];
+        const shortIds = rawShortIds
+          .map(sid => String(sid))
+          .filter(sid => sid.length > 0);
+        if (shortIds.length > 0) {
+          const sid = shortIds[Math.floor(Math.random() * shortIds.length)];
+          params.set('sid', sid);
+        }
+        if (settings.spiderX) {
+          params.set('spx', settings.spiderX);
+        } else {
+          params.set('spx', '/' + this.randomString(15));
+        }
+        if (settings.mldsa65Verify) {
+          params.set('pqv', settings.mldsa65Verify);
+        }
+      }
+
+      handleVmessTcp(stream, obj) {
+        const tcp = stream.tcpSettings || {};
+        const header = tcp.header || {};
+        const typeStr = header.type || 'none';
+        obj.type = typeStr;
+        if (typeStr === 'http') {
+          const request = header.request || {};
+          const requestPath = request.path || [];
+          if (requestPath.length > 0) {
+            obj.path = requestPath[0];
+          }
+          const headers = request.headers || {};
+          obj.host = this.searchHost(headers);
+        }
+      }
+
+      handleVmessKcp(stream, obj) {
+        const kcp = stream.kcpSettings || {};
+        const header = kcp.header || {};
+        obj.type = header.type || 'none';
+        obj.path = kcp.seed || '';
+      }
+
+      handleVmessWs(stream, obj) {
+        const ws = stream.wsSettings || {};
+        obj.path = ws.path || '';
+        if (ws.host) {
+          obj.host = ws.host;
+        } else {
+          const headers = ws.headers || {};
+          obj.host = this.searchHost(headers);
+        }
+      }
+
+      handleVmessGrpc(stream, obj) {
+        const grpc = stream.grpcSettings || {};
+        obj.path = grpc.serviceName || '';
+        obj.authority = grpc.authority || '';
+        if (grpc.multiMode) {
+          obj.type = 'multi';
+        }
+      }
+
+      handleVmessHttpUpgrade(stream, obj) {
+        const httpupgrade = stream.httpupgradeSettings || {};
+        obj.path = httpupgrade.path || '';
+        if (httpupgrade.host) {
+          obj.host = httpupgrade.host;
+        } else {
+          const headers = httpupgrade.headers || {};
+          obj.host = this.searchHost(headers);
+        }
+      }
+
+      handleVmessXhttp(stream, obj) {
+        const xhttp = stream.xhttpSettings || {};
+        obj.path = xhttp.path || '';
+        if (xhttp.host) {
+          obj.host = xhttp.host;
+        } else {
+          const headers = xhttp.headers || {};
+          obj.host = this.searchHost(headers);
+        }
+        obj.mode = xhttp.mode || '';
+      }
+
+      handleVmessTls(stream, obj) {
+        const tlsSetting = stream.tlsSettings || {};
+        const alpns = tlsSetting.alpn || [];
+        if (alpns.length > 0) {
+          obj.alpn = alpns.join(',');
+        }
+        if (tlsSetting.serverName) {
+          obj.sni = tlsSetting.serverName;
+        }
+
+        const settings = tlsSetting.settings || {};
+        if (settings.fingerprint) {
+          obj.fp = settings.fingerprint;
+        }
+        if (settings.allowInsecure) {
+          obj.allowInsecure = settings.allowInsecure;
+        }
+      }
+
+      genMultipleLinks(protocol, credential, externalProxies, baseParams, inbound, email, stream, flow) {
+        const links = [];
+        const security = stream.security || 'none';
+        externalProxies.forEach(ep => {
+          const newSecurity = ep.forceTls || 'same';
+          const dest = ep.dest;
+          const port = ep.port;
+          const params = new URLSearchParams();
+          baseParams.forEach((value, key) => {
+            params.set(key, value);
+          });
+          if (newSecurity !== 'same') {
+            params.set('security', newSecurity);
+            if (newSecurity === 'none') {
+              params.delete('alpn');
+              params.delete('sni');
+              params.delete('fp');
+              params.delete('allowInsecure');
+              params.delete('pbk');
+              params.delete('sid');
+              params.delete('spx');
+              params.delete('pqv');
+              params.delete('flow');
+            } else if (newSecurity === 'tls') {
+              params.delete('pbk');
+              params.delete('sid');
+              params.delete('spx');
+              params.delete('pqv');
+              if (security !== 'tls') {
+                const tlsSetting = stream.tlsSettings || {};
+                if (tlsSetting.serverName) {
+                  params.set('sni', tlsSetting.serverName);
+                }
+                const settings = tlsSetting.settings || {};
+                if (settings.fingerprint) {
+                  params.set('fp', settings.fingerprint);
+                }
+              }
+            }
+          } else {
+            params.set('security', security);
+          }
+          let link = `${protocol}://${credential}@${dest}:${port}`;
+          const url = new URL(link);
+          params.forEach((value, key) => {
+            url.searchParams.set(key, value);
+          });
+          url.hash = this.genRemark(inbound, email, ep.remark || '');
+          links.push(url.toString());
+        });
+        return links.join('\n');
+      }
+
+      genVmessMultipleLinks(baseObj, externalProxies, inbound, email, security) {
+        const links = [];
+        externalProxies.forEach(ep => {
+          const newSecurity = ep.forceTls || 'same';
+          const obj = {};
+          for (const key in baseObj) {
+            obj[key] = baseObj[key];
+          }
+          obj.add = ep.dest;
+          obj.port = ep.port;
+          obj.ps = this.genRemark(inbound, email, ep.remark || '');
+          if (newSecurity !== 'same') {
+            obj.tls = newSecurity;
+            if (newSecurity === 'none') {
+              delete obj.alpn;
+              delete obj.sni;
+              delete obj.fp;
+              delete obj.allowInsecure;
+            }
+          }
+          const jsonStr = JSON.stringify(obj, null, 2);
+          links.push('vmess://' + btoa(jsonStr));
+        });
+        return links.join('\n');
+      }
+
+      genSsMultipleLinks(encPart, externalProxies, baseParams, inbound, email, security, stream) {
+        const links = [];
+        externalProxies.forEach(ep => {
+          const newSecurity = ep.forceTls || 'same';
+          const dest = ep.dest;
+          const port = ep.port;
+          const params = new URLSearchParams();
+          baseParams.forEach((value, key) => {
+            params.set(key, value);
+          });
+          if (newSecurity !== 'same') {
+            params.set('security', newSecurity);
+            if (newSecurity === 'none') {
+              params.delete('alpn');
+              params.delete('sni');
+              params.delete('fp');
+              params.delete('allowInsecure');
+            }
+          } else {
+            params.set('security', security);
+          }
+          const encodedPart = btoa(encPart).replace(/=+$/, '');
+          let link = `ss://${encodedPart}@${dest}:${port}`;
+          const url = new URL(link);
+          params.forEach((value, key) => {
+            url.searchParams.set(key, value);
+          });
+          url.hash = this.genRemark(inbound, email, ep.remark || '');
+          links.push(url.toString());
+        });
+        return links.join('\n');
+      }
+
+      genRemark(inbound, email, extra) {
+        const separationChar = this.remarkModel[0];
+        const orderChars = this.remarkModel.substring(1);
+        const orders = {
+          'i': inbound.remark || '',
+          'e': email || '',
+          'o': extra || ''
+        };
+        if (orders['i'] && orders['e'] && orders['i'] === orders['e']) {
+          orders['e'] = '';
+        }
+        if (orders['i'] && orders['o'] && orders['i'] === orders['o']) {
+          orders['o'] = '';
+        }
+        if (orders['e'] && orders['o'] && orders['e'] === orders['o']) {
+          orders['o'] = '';
+        }
+        const remark = [];
+        for (let i = 0; i < orderChars.length; i++) {
+          const char = orderChars[i];
+          const order = orders[char];
+          if (order) {
+            remark.push(order);
+          }
+        }
+        return remark.join(separationChar);
+      }
+
+      searchHost(headers) {
+        for (const key in headers) {
+          if (key.toLowerCase() === 'host') {
+            const value = headers[key];
+            if (Array.isArray(value) && value.length > 0) {
+              return value[0];
+            }
+            return value;
+          }
+        }
+        return '';
+      }
+
+      randomString(length) {
+        const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+        let result = '';
+        for (let i = 0; i < length; i++) {
+          result += chars.charAt(Math.floor(Math.random() * chars.length));
+        }
+        return result;
+      }
+
+      isNodeValid(inbound) {
+        if (!inbound.enable) {
+          return false;
+        }
+        const now = Date.now();
+        return !(inbound.expiryTime > 0 && inbound.expiryTime < now);
+      }
+
+      generateAllLinks(apiResponse, address) {
+        const results = [];
+        if (!apiResponse.success || !apiResponse.obj) {
+          console.error('无效的 API 响应');
+          return results;
+        }
+        apiResponse.obj.forEach(inbound => {
+          if (!this.isNodeValid(inbound)) {
+            return;
+          }
+          const links = this.generateLinks(inbound, address);
+          if (links.length > 0) {
+            results.push({
+              id: inbound.id,
+              remark: inbound.remark,
+              protocol: inbound.protocol,
+              port: inbound.port,
+              links: links
+            });
+          }
+        });
+        return results;
+      }
+    }
 
     const DEFAULT_CONFIG = {
         startPort: 30000,
@@ -56,7 +702,9 @@
         settings: `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0 .33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>`,
         shieldOff: `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path><line x1="4.03" y1="4.03" x2="19.97" y2="19.97"></line></svg>`,
         plus: `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="16"></line><line x1="8" y1="12" x2="16" y2="12"></line></svg>`,
-        route: `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>`
+        route: `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>`,
+        list: `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line></svg>`,
+        copy: `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>`
     };
 
     function injectStyles() {
@@ -65,9 +713,9 @@
             #xui-float-btn{position:fixed;top:20px;right:20px;width:50px;height:50px;background:#1f2937;border-radius:50%;color:white;display:flex;align-items:center;justify-content:center;cursor:move;box-shadow:0 4px 15px rgba(0,0,0,0.3);z-index:9998;transition:transform .2s,background .2s;user-select:none}
             #xui-float-btn:hover{background:#000;transform:scale(1.05)}
             #xui-float-btn:active{transform:scale(0.95)}
-            #xui-backdrop,#xui-route-backdrop,#xui-delete-backdrop{position:fixed;inset:0;background:rgba(0,0,0,0.7);backdrop-filter:blur(4px);z-index:9999;display:none;justify-content:center;align-items:center;animation:fadeIn .4s ease-in-out}
+            #xui-backdrop,#xui-route-backdrop,#xui-delete-backdrop,#xui-shownodes-backdrop{position:fixed;inset:0;background:rgba(0,0,0,0.7);backdrop-filter:blur(4px);z-index:9999;display:none;justify-content:center;align-items:center;animation:fadeIn .4s ease-in-out}
             @keyframes fadeIn{from{opacity:0}to{opacity:1}}
-            #xui-panel,#xui-route-panel,#xui-delete-panel{background:#fff;width:900px;max-height:90vh;overflow-y:auto;border-radius:12px;box-shadow:0 25px 50px rgba(0,0,0,0.4);animation:slideUp .4s cubic-bezier(.34,1.56,.64,1);border:1px solid #e5e7eb}
+            #xui-panel,#xui-route-panel,#xui-delete-panel,#xui-shownodes-panel{background:#fff;width:900px;max-height:90vh;overflow-y:auto;border-radius:12px;box-shadow:0 25px 50px rgba(0,0,0,0.4);animation:slideUp .4s cubic-bezier(.34,1.56,.64,1);border:1px solid #e5e7eb}
             #xui-confirm-backdrop{position:fixed;inset:0;background:rgba(0,0,0,0.7);backdrop-filter:blur(4px);z-index:10001;display:none;justify-content:center;align-items:center;animation:fadeIn .4s ease-in-out}
             .xp-confirm-panel{background:#fff;width:400px;padding:20px;border-radius:12px;box-shadow:0 25px 50px rgba(0,0,0,0.4);animation:slideUp .4s cubic-bezier(.34,1.56,.64,1);border:1px solid #e5e7eb;text-align:center}
             .xp-confirm-title{font-size:18px;font-weight:700;color:#1f2937;margin-bottom:12px}
@@ -126,8 +774,8 @@
             .xp-config-input:focus{border-color:#1f2937;outline:none}
             .xp-config-checkbox-group{display:flex;align-items:center;gap:10px;font-size:14px;color:#1f2937}
             .xp-config-title-small{font-size:16px;font-weight:700;color:#1f2937;margin-bottom:16px;border-bottom:1px solid #e5e7eb;padding-bottom:8px}
-            .xp-save-config-btn{background:#10b981;color:white;border:none;padding:10px 20px;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;transition:all .3s;box-shadow:0 4px 10px rgba(16,185,129,.5)}
-            .xp-save-config-btn:hover{background:#059669;transform:translateY(-1px);box-shadow:0 6px 15px rgba(16,185,129,.7)}
+            .xp-save-config-btn{background:#1f2937;color:white;border:none;padding:10px 20px;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;transition:all .3s;box-shadow:0 4px 10px rgba(31,41,55,.3)}
+            .xp-save-config-btn:hover{background:#000;transform:translateY(-1px);box-shadow:0 6px 15px rgba(31,41,55,.4)}
             .xp-danger-btn{color:#ef4444;font-size:13px;cursor:pointer;transition:color .2s;font-weight:500;display:flex;align-items:center;gap:4px;background:none;border:1px solid transparent;padding:4px 8px;border-radius:6px}
             .xp-danger-btn:hover{background:#fef2f2;color:#dc2626}
             .xp-action-btn{color:#3b82f6;font-size:13px;cursor:pointer;transition:color .2s;font-weight:500;display:flex;align-items:center;gap:4px;background:none;border:1px solid transparent;padding:4px 8px;border-radius:6px}
@@ -136,12 +784,74 @@
             .route-item:last-child{border-bottom:none}
             .route-tag{background:#e5e7eb;color:#1f2937;padding:3px 9px;border-radius:6px;font-size:12px;font-family:SF Mono,Menlo,Monaco,Consolas,monospace;font-weight:600;letter-spacing:0.5px}
             .route-hint{font-size:11px;color:#9ca3af;position:absolute;right:12px;top:50%;transform:translateY(-50%)}
-            .route-remark { margin-left: auto; color: #6b7280; font-size: 12px; }
+            .route-remark{margin-left:auto;color:#6b7280;font-size:12px}
+            .node-result-item{margin-bottom:20px;border:1px solid #e5e7eb;border-radius:8px;padding:16px}
+            .node-info-row{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+            .node-name{font-weight:700;color:#1f2937}
+            .node-protocol{background:#e5e7eb;color:#4b5563;padding:2px 8px;border-radius:4px;font-size:12px;font-weight:600;text-transform:uppercase}
+            .node-link-wrapper{position:relative;margin-top:8px}
+            .node-link-scroller{background:#f6f8fa;border-radius:6px;padding:12px;font-family:SF Mono,Menlo,Monaco,Consolas,monospace;font-size:12px;color:#24292f;overflow-x:auto;white-space:nowrap}
+            .node-copy-btn{position:absolute;top:4px;right:4px;padding:4px;background:transparent;border:1px solid rgba(27,31,36,0.15);border-radius:6px;cursor:pointer;display:flex;align-items:center;justify-content:center;background-color:#f6f8fa;transition:all 0.2s;color:#57606a;z-index:1}
+            .node-copy-btn:hover{background-color:#f3f4f6;border-color:rgba(27,31,36,0.15);color:#24292f}
+            .node-copy-btn svg{width:14px;height:14px}
+            .xp-stats-card{background:#f9fafb;border-radius:8px;padding:16px;margin-bottom:20px;border:1px solid #e5e7eb}
+            .xp-stat-item{font-size:13px;color:#4b5563;margin-bottom:8px;display:flex;align-items:center;gap:4px}
+            .xp-stat-item b{font-weight:700;color:#1f2937}
+            .xp-stat-item.enabled b{color:#10b981}
+            .xp-stat-item.disabled b{color:#ef4444}
+            .xp-stat-item.expired b{color:#f59e0b}
+            .xp-stats-row{display:flex;align-items:center;flex-wrap:wrap;gap:24px}
+            .xp-protocols-section{margin-top:12px;padding-top:12px;border-top:1px solid #e5e7eb}
+            .xp-protocol-list{display:flex;align-items:center;flex-wrap:wrap;gap:12px}
+            .xp-protocol-list .xp-protocol-item{min-width:auto;border:1px solid #d1d5db;border-radius:16px;padding:2px 10px;font-size:13px;color:#4b5563;background:white;margin:0}
+            .xp-protocol-list .xp-protocol-item .protocol-count{font-weight:700;color:#1f2937}
+            .xp-protocol-list .protocol-name{font-weight:400;color:#374151}
+            .xp-config-checkbox-group input[type="checkbox"]{width:16px;height:16px}
+            .xp-config-checkbox-group label.xp-config-label{margin:0}
+            #shownodes-copy-all{width:auto;display:inline-flex;align-items:center;gap:6px}
+            #xui-shownodes-panel .xp-body{padding-bottom:24px}
+            .xp-header-content { display: flex; justify-content: space-between; align-items: center; }
+            .xp-header .xp-create-btn-main { padding: 8px 14px; font-size: 13px; }
+            #route-inbounds-list{max-height:420px;overflow-y:auto;border:1px solid #eee;border-radius:8px}
+            .route-inbounds-header{margin-bottom:12px;display:flex;align-items:center;justify-content:space-between}
+            #delete-nodes-list{max-height:420px;overflow-y:auto;border:1px solid #eee;border-radius:8px}
+            .delete-nodes-header{margin-bottom:12px;display:flex;align-items:center;justify-content:space-between}
+            #delete-apply-btn{background:#ef4444;color:white;padding:10px 20px;border-radius:8px}
+            #xui-delete-panel .xp-body, #xui-route-panel .xp-body {padding-bottom:0}
+            .radio-group{margin-bottom:16px;display:flex;gap:16px;align-items:center}
+            .route-remark-port{color:#6b7280;font-size:12px;margin-left:auto;margin-right:120px}
         `;
         const style = document.createElement('style');
         style.id = 'xui-css';
         document.head.appendChild(style);
         style.textContent = css;
+    }
+
+    function getInboundStats(inbounds) {
+        const now = Date.now();
+        const stats = {
+            total: inbounds.length,
+            enabled: 0,
+            disabled: 0,
+            expired: 0,
+            protocols: {}
+        };
+        inbounds.forEach(inbound => {
+            const protocol = inbound.protocol.toUpperCase();
+            if (!stats.protocols[protocol]) {
+                stats.protocols[protocol] = 0;
+            }
+            stats.protocols[protocol]++;
+            if (inbound.enable) {
+                stats.enabled++;
+            } else {
+                stats.disabled++;
+            }
+            if (inbound.expiryTime > 0 && inbound.expiryTime < now) {
+                stats.expired++;
+            }
+        });
+        return stats;
     }
 
     function toast(msg, type) {
@@ -669,18 +1379,18 @@
                     <div class="xp-subtitle">绑定路由规则IPv4/IPv6优先</div>
                     <div class="xp-close" id="route-close">${SVG_ICONS.close}</div>
                 </div>
-                <div class="xp-body" style="padding-bottom:0">
-                    <div style="margin-bottom:16px;display:flex;gap:16px;align-items:center">
+                <div class="xp-body">
+                    <div class="radio-group">
                         <label><input type="radio" name="outbound" value="${ipv4v6Tag}" checked> IPv4优先 (${ipv4v6Tag})</label>
                         <label><input type="radio" name="outbound" value="${ipv6v4Tag}"> IPv6优先 (${ipv6v4Tag})</label>
                     </div>
-                    <div style="margin-bottom:12px;display:flex;align-items:center;justify-content:space-between">
+                    <div class="route-inbounds-header">
                         <div class="xp-select-all" id="route-select-all">
-                            <div class="xp-checkbox checked" id="route-select-all-cb" style="margin-right:8px">${SVG_ICONS.check}</div>全选可用
+                            <div class="xp-checkbox" id="route-select-all-cb"></div>全选可用
                         </div>
                         <button class="xp-create-btn-main" id="route-apply-btn">应用并保存</button>
                     </div>
-                    <div id="route-inbounds-list" style="max-height:420px;overflow-y:auto;border:1px solid #eee;border-radius:8px"></div>
+                    <div id="route-inbounds-list"></div>
                 </div>
             </div>
         `;
@@ -728,12 +1438,12 @@
             const inV4 = v4Tags.has(tag);
             const inV6 = v6Tags.has(tag);
             const hint = inV4 ? '已绑定IPv4优先' : inV6 ? '已绑定IPv6优先' : '';
-            const isChecked = (document.querySelector('input[name="outbound"]:checked').value === "UseIPv4v6" ? inV4 : inV6);
+            const isChecked = (document.querySelector('input[name="outbound"]:checked').value === ipv4v6Tag ? inV4 : inV6);
             return `
                 <div class="route-item">
-                    <div class="xp-checkbox ${isChecked ? 'checked' : ''} ${inV4 && inV6 ? 'disabled' : ''}" data-tag="${tag}">${isChecked ? SVG_ICONS.check : ''}</div>
+                    <div class="xp-checkbox ${isChecked ? 'checked' : ''}" data-tag="${tag}">${isChecked ? SVG_ICONS.check : ''}</div>
                     <span class="route-tag">${tag}</span>
-                    <span class="route-remark" style="color: #6b7280; font-size: 12px; margin-left: auto;margin-right: 120px;">${remark}</span>
+                    <span class="route-remark">${remark}</span>
                     ${hint ? `<span class="route-hint">${hint}</span>` : ''}
                 </div>
             `;
@@ -837,14 +1547,14 @@
                     <div class="xp-subtitle">选择节点进行批量删除</div>
                     <div class="xp-close" id="delete-close">${SVG_ICONS.close}</div>
                 </div>
-                <div class="xp-body" style="padding-bottom:0">
-                    <div style="margin-bottom:12px;display:flex;align-items:center;justify-content:space-between">
+                <div class="xp-body">
+                    <div class="delete-nodes-header">
                         <div class="xp-select-all" id="delete-select-all">
-                            <div class="xp-checkbox checked" id="delete-select-all-cb" style="margin-right:8px">${SVG_ICONS.check}</div>全选
+                            <div class="xp-checkbox" id="delete-select-all-cb"></div>全选
                         </div>
-                        <button class="xp-danger-btn" id="delete-apply-btn" style="background:#ef4444;color:white;padding:10px 20px;border-radius:8px;">删除选中</button>
+                        <button class="xp-danger-btn" id="delete-apply-btn">删除选中</button>
                     </div>
-                    <div id="delete-nodes-list" style="max-height:420px;overflow-y:auto;border:1px solid #eee;border-radius:8px"></div>
+                    <div id="delete-nodes-list"></div>
                 </div>
             </div>
         `;
@@ -856,7 +1566,7 @@
             <div class="route-item">
                 <div class="xp-checkbox" data-id="${item.id}"></div>
                 <span class="route-tag">${item.remark}</span>
-                <span class="route-remark" style="color: #6b7280; font-size: 12px; margin-left: auto;margin-right: 120px;">端口: ${item.port} | 类型: ${item.protocol}</span>
+                <span class="route-remark-port">端口: ${item.port} | 类型: ${item.protocol}</span>
             </div>
         `).join('') : '<div style="text-align:center;color:#999;padding:30px">暂无节点</div>';
 
@@ -934,6 +1644,127 @@
         };
 
         updateDeleteSelectAllState();
+    }
+
+    async function openShowNodes() {
+        let results = [];
+        let stats= {};
+        let protocolList;
+        try {
+            const res = await fetch(`${getBasePath()}/panel/api/inbounds/list`);
+            const data = await res.json();
+            const generator = new NodeGenerator({ address: location.hostname });
+            results = generator.generateAllLinks(data, location.hostname);
+
+            stats = getInboundStats(data.obj);
+            protocolList = Object.entries(stats.protocols)
+                .map(([protocol, count]) => `<span>${protocol}: <b>${count}</b></span>`)
+                .join(' | ');
+
+        } catch (e) {
+            toast('获取节点信息失败: ' + e.message, 'error');
+            return;
+        }
+
+        const backdrop = document.createElement('div');
+        backdrop.id = 'xui-shownodes-backdrop';
+        backdrop.innerHTML = `
+            <div id="xui-shownodes-panel">
+                <div class="xp-header">
+                    <div class="xp-header-content">
+                        <div>
+                            <div class="xp-title">节点列表</div>
+                            <div class="xp-subtitle">查看所有节点链接</div>
+                        </div>
+                        <button class="xp-create-btn-main" id="shownodes-copy-all">${SVG_ICONS.copy} 复制全部节点</button>
+                    </div>
+                    <div class="xp-close" id="shownodes-close">${SVG_ICONS.close}</div>
+                </div>
+                <div class="xp-body">
+                    <div id="shownodes-list"></div>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(backdrop);
+        backdrop.style.display = 'flex';
+
+        function formatProtocolList(stats) {
+            if (!stats.protocols || Object.keys(stats.protocols).length === 0) return '';
+            const itemsHtml = Object.entries(stats.protocols).map(([protocol, count]) => {
+                return `
+                    <div class="xp-protocol-item">
+                        <span class="protocol-name">${protocol}:</span> 
+                        <b class="protocol-count">${count || 0}</b>
+                    </div>
+                `;
+            }).join('');
+            return `<div class="xp-protocol-list">${itemsHtml}</div>`;
+        }
+
+        const list = document.getElementById('shownodes-list');
+        list.innerHTML = ` 
+        <div id="xp-node-stats" class="xp-stats-card"> 
+            <div class="xp-stats-row"> 
+                <div class="xp-stat-item">总节点数: <b>${stats.total}</b></div> 
+                <div class="xp-stat-item enabled">已启用: <b>${stats.enabled}</b></div> 
+                <div class="xp-stat-item disabled">已禁用: <b>${stats.disabled}</b></div> 
+                <div class="xp-stat-item expired">已过期: <b>${stats.expired}</b></div> 
+            </div> 
+            <div class="xp-protocols-section">
+                ${formatProtocolList(stats)}
+            </div>
+        </div>
+        ` + (results.length ? results.map(item => {
+            const linksHtml = item.links.map(link => `
+                <div class="node-link-wrapper">
+                    <div class="node-link-scroller">
+                        <span>${link}</span>
+                    </div>
+                    <button class="node-copy-btn" title="Copy" data-link="${link}">${SVG_ICONS.copy}</button>
+                </div>
+            `).join('');
+            return `
+                <div class="node-result-item">
+                    <div class="node-info-row">
+                        <span class="node-name">${item.remark}</span>
+                        <span class="node-protocol">${item.protocol}</span>
+                    </div>
+                    ${linksHtml}
+                </div>
+            `;
+        }).join('') : '<div style="text-align:center;color:#999;padding:30px">暂无可用节点链接</div>');
+
+        if (results.length === 0) {
+            const copyAllBtn = document.getElementById('shownodes-copy-all');
+            copyAllBtn.disabled = true;
+            copyAllBtn.textContent = '无节点可复制';
+        }
+
+        const copyToClipboard = (text) => {
+            const textarea = document.createElement("textarea");
+            textarea.value = text;
+            document.body.appendChild(textarea);
+            textarea.select();
+            document.execCommand("copy");
+            document.body.removeChild(textarea);
+            toast('已复制到剪贴板', 'success');
+        };
+
+        document.getElementById('shownodes-close').onclick = () => backdrop.remove();
+        backdrop.onclick = e => { if (e.target === backdrop) backdrop.remove(); };
+
+        document.getElementById('shownodes-copy-all').onclick = () => {
+            const allLinks = results.flatMap(r => r.links).join('\n');
+            if (allLinks) copyToClipboard(allLinks);
+            else toast('没有可复制的链接', 'error');
+        };
+
+        list.querySelectorAll('.node-copy-btn').forEach(btn => {
+            btn.onclick = () => {
+                const link = btn.dataset.link;
+                copyToClipboard(link);
+            };
+        });
     }
 
     async function createSelectedNodes() {
@@ -1036,14 +1867,15 @@
     function showProtocolsView() {
         document.getElementById('xp-protocols-view').style.display = 'block';
         document.getElementById('xp-config-view').style.display = 'none';
-        updateHeader('3X-UI多功能脚本', '一键生成节点 (VLESS/VMESS/SS) & 一键关闭订阅访问 & 一键添加出站规则 & 一键配置路由规则 & 一键配删除入站节点');
+        updateHeader('3X-UI多功能脚本', '3X-UI一键生成节点 (VLESS/VMESS/SS) & 一键关闭订阅访问 & 一键添加出站规则 & 一键配置路由规则 & 一键配删除入站节点 & 节点链接展示');
         document.getElementById('xp-footer').innerHTML = `
             <div class="xp-select-all" id="xp-select-all-btn">
-                <div class="xp-checkbox checked" id="xp-select-all-cb" style="margin-right: 8px;">${SVG_ICONS.check}</div>
+                <div class="xp-checkbox" id="xp-select-all-cb" style="margin-right: 8px;"></div>
                 全选
             </div>
             <div style="display:flex; gap:10px; align-items:center;">
                 <button class="xp-danger-btn" id="xp-disable-sub-btn">${SVG_ICONS.shieldOff} 关闭订阅</button>
+                <button class="xp-action-btn" id="xp-show-nodes-btn">${SVG_ICONS.list} 展示节点</button>
                 <button class="xp-action-btn" id="xp-add-outbound-btn">${SVG_ICONS.plus} 添加出站</button>
                 <button class="xp-action-btn" id="xp-route-config-btn">${SVG_ICONS.route} 路由规则</button>
                 <button class="xp-danger-btn" id="xp-batch-delete-btn">${SVG_ICONS.close} 批量删除</button>
@@ -1075,6 +1907,7 @@
     function setupEventsInProtocolsView() {
         document.getElementById('xp-create-btn-main').onclick = createSelectedNodes;
         document.getElementById('xp-disable-sub-btn').onclick = disableSubscription;
+        document.getElementById('xp-show-nodes-btn').onclick = openShowNodes;
         document.getElementById('xp-add-outbound-btn').onclick = addOutboundRules;
         document.getElementById('xp-route-config-btn').onclick = openRoutingConfig;
         document.getElementById('xp-batch-delete-btn').onclick = openBatchDelete;
@@ -1101,7 +1934,8 @@
         document.getElementById('xp-close-btn').addEventListener('click', closeModal);
         bd.addEventListener('click', (e) => { if(e.target === bd) closeModal(); });
         document.getElementById('xp-footer').addEventListener('click', (e) => {
-            if (e.target && (e.target.id === 'xp-return-protocols-btn' || e.target.parentElement.id === 'xp-return-protocols-btn')) {
+            const returnBtn = e.target.closest('#xp-return-protocols-btn');
+            if (returnBtn) {
                 e.preventDefault();
                 showProtocolsView();
             }
@@ -1149,7 +1983,7 @@
                 <div class="xp-protocol-item selected" data-protocol="vless_xhttp_enc_tls">
                     <div class="xp-protocol-header">
                         <div class="xp-protocol-main"><div class="xp-protocol-icon">${SVG_ICONS.ladder}</div><div class="xp-protocol-name">VLESS XHTTP Encryption (Post-Quantum) (TLS)</div></div>
-                        <div class="xp-protocol-actions">${renderCheckbox('vless_xhttp_enc_tls', tlsDisabled ? false : true, tlsDisabled)}<button class="xp-toggle-btn" id="toggle-vless_xhttp_enc_tls">${SVG_ICONS.toggle}</button></div>
+                        <div class="xp-protocol-actions">${renderCheckbox('vless_xhttp_enc_tls', !tlsDisabled, tlsDisabled)}<button class="xp-toggle-btn" id="toggle-vless_xhttp_enc_tls">${SVG_ICONS.toggle}</button></div>
                     </div>
                     <div class="xp-info-panel" id="info-vless_xhttp_enc_tls"><div class="xp-info-content"><div class="xp-info-title">配置详情</div><div class="xp-info-list"><div class="xp-info-item">Auth: ML-KEM-768</div><div class="xp-info-item">安全: tls</div></div></div></div>
                 </div>
@@ -1163,7 +1997,7 @@
                 <div class="xp-protocol-item selected" data-protocol="vless_ws_tls">
                     <div class="xp-protocol-header">
                         <div class="xp-protocol-main"><div class="xp-protocol-icon">${SVG_ICONS.ladder}</div><div class="xp-protocol-name">VLESS WS (TLS)</div></div>
-                        <div class="xp-protocol-actions">${renderCheckbox('vless_ws_tls', tlsDisabled ? false : true, tlsDisabled)}<button class="xp-toggle-btn" id="toggle-vless_ws_tls">${SVG_ICONS.toggle}</button></div>
+                        <div class="xp-protocol-actions">${renderCheckbox('vless_ws_tls', !tlsDisabled, tlsDisabled)}<button class="xp-toggle-btn" id="toggle-vless_ws_tls">${SVG_ICONS.toggle}</button></div>
                     </div>
                     <div class="xp-info-panel" id="info-vless_ws_tls"><div class="xp-info-content"><div class="xp-info-title">配置详情</div><div class="xp-info-list"><div class="xp-info-item">传输: WS</div><div class="xp-info-item">安全: tls</div></div></div></div>
                 </div>
@@ -1177,7 +2011,7 @@
                 <div class="xp-protocol-item selected" data-protocol="vmess_ws_tls">
                     <div class="xp-protocol-header">
                         <div class="xp-protocol-main"><div class="xp-protocol-icon">${SVG_ICONS.ladder}</div><div class="xp-protocol-name">VMESS WS (TLS)</div></div>
-                        <div class="xp-protocol-actions">${renderCheckbox('vmess_ws_tls', tlsDisabled ? false : true, tlsDisabled)}<button class="xp-toggle-btn" id="toggle-vmess_ws_tls">${SVG_ICONS.toggle}</button></div>
+                        <div class="xp-protocol-actions">${renderCheckbox('vmess_ws_tls', !tlsDisabled, tlsDisabled)}<button class="xp-toggle-btn" id="toggle-vmess_ws_tls">${SVG_ICONS.toggle}</button></div>
                     </div>
                     <div class="xp-info-panel" id="info-vmess_ws_tls"><div class="xp-info-content"><div class="xp-info-title">配置详情</div><div class="xp-info-list"><div class="xp-info-item">传输: WS</div><div class="xp-info-item">安全: tls</div></div></div></div>
                 </div>
@@ -1213,7 +2047,7 @@
                 <div class="xp-config-group"><label for="config-startPort" class="xp-config-label">起始查找端口</label><input type="number" id="config-startPort" class="xp-config-input" min="1" max="65535" value="${CONFIG.startPort}"></div>
                 <div class="xp-config-group"><label for="config-target" class="xp-config-label">Reality Target</label><input type="text" id="config-target" class="xp-config-input" value="${CONFIG.target}"></div>
                 <div class="xp-config-group"><label for="config-serverName" class="xp-config-label">Reality SNI</label><input type="text" id="config-serverName" class="xp-config-input" value="${CONFIG.serverName}"></div>
-                <div class="xp-config-group"><div class="xp-config-checkbox-group"><input type="checkbox" id="config-randomPortMode" style="width: 16px; height: 16px;" ${CONFIG.randomPortMode ? 'checked' : ''}><label for="config-randomPortMode" class="xp-config-label" style="margin: 0;">启用随机端口模式 (10000-60000)</label></div></div>
+                <div class="xp-config-group"><div class="xp-config-checkbox-group"><input type="checkbox" id="config-randomPortMode" ${CONFIG.randomPortMode ? 'checked' : ''}><label for="config-randomPortMode" class="xp-config-label">启用随机端口模式 (10000-60000)</label></div></div>
             </div>
         `;
     }
