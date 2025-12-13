@@ -1,11 +1,12 @@
 // ==UserScript==
 // @name         3X-UI多功能脚本
 // @namespace    http://tampermonkey.net/
-// @version      1.6
+// @version      1.7
 // @description  3X-UI一键生成节点 (VLESS/VMESS/SS) & 一键关闭订阅访问 & 一键添加出站规则 & 一键配置路由规则 & 一键配删除入站节点 & 节点链接展示
 // @icon         https://avatars.githubusercontent.com/u/86963023
 // @author       Yannick Young
 // @match        *://*/*/panel/*
+// @match        *://*/xui/*
 // @grant        none
 // ==/UserScript==
 
@@ -41,7 +42,7 @@
             }
           } else {
             clients.forEach(client => {
-              if (client.enable) {
+              if (client.enable !== false) {
                 const link = this.getLink(inbound, client, streamSettings);
                 if (link) {
                   links.push(link);
@@ -103,7 +104,7 @@
         }
         const obj = {
           v: '2',
-          ps: this.genRemark(inbound, client.email, ''),
+          ps: this.genRemark(inbound, client.email || '', ''),
           add: this.address,
           port: inbound.port,
           id: client.id,
@@ -348,7 +349,7 @@
 
       handleRealityParams(stream, params) {
         const realitySetting = stream.realitySettings || {};
-        const settings = realitySetting.settings || {};
+        const settings = realitySetting.settings || realitySetting;
         if (settings.publicKey) {
           params.set('pbk', settings.publicKey);
         }
@@ -865,7 +866,7 @@
 
     function getBasePath() {
         const pathname = window.location.pathname;
-        const match = pathname.match(/(.*)\/panel\//);
+        const match = pathname.match(/(.*)\/(panel|xui)\//);
         const prefix = match ? match[1] : '';
         return `${window.location.origin}${prefix}`;
     }
@@ -1651,7 +1652,14 @@
         let stats= {};
         let protocolList;
         try {
-            const res = await fetch(`${getBasePath()}/panel/api/inbounds/list`);
+            const isXUI = window.location.pathname.includes('/xui/');
+            const apiUrl = isXUI
+                ? `${getBasePath()}/xui/inbound/list`
+                : `${getBasePath()}/panel/api/inbounds/list`;
+
+            const res = await fetch(apiUrl, {
+                method: isXUI ? 'POST' : 'GET'
+            });
             const data = await res.json();
             const generator = new NodeGenerator({ address: location.hostname });
             results = generator.generateAllLinks(data, location.hostname);
