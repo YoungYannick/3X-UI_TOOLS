@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         3X-UI多功能脚本
 // @namespace    http://tampermonkey.net/
-// @version      2.0.1
+// @version      2.0.3
 // @description  3X-UI 多功能工具：一键创建/查看/删除节点、关闭订阅、出站/路由配置，适配 2.x/3.x
 // @icon         https://avatars.githubusercontent.com/u/86963023
 // @author       Yannick Young
@@ -150,7 +150,7 @@
           return this.genVmessMultipleLinks(obj, externalProxies, inbound, client.email, security);
         }
         const jsonStr = JSON.stringify(obj, null, 2);
-        return 'vmess://' + btoa(jsonStr);
+        return 'vmess://' + this.base64EncodeUtf8(jsonStr);
       }
 
       genTrojanLink(inbound, client, stream) {
@@ -682,9 +682,16 @@
             }
           }
           const jsonStr = JSON.stringify(obj, null, 2);
-          links.push('vmess://' + btoa(jsonStr));
+          links.push('vmess://' + this.base64EncodeUtf8(jsonStr));
         });
         return links.join('\n');
+      }
+
+      base64EncodeUtf8(value) {
+        const bytes = new TextEncoder().encode(String(value));
+        let binary = '';
+        bytes.forEach(byte => { binary += String.fromCharCode(byte); });
+        return btoa(binary);
       }
 
       genSsMultipleLinks(encPart, externalProxies, baseParams, inbound, email, security, stream) {
@@ -911,7 +918,7 @@
         if (stored !== null) return stored === 'true';
         if (document.body.classList.contains('light')) return false;
         if (document.body.classList.contains('dark')) return true;
-        return true;
+        return false;
     }
 
     let lastThemeMode = null;
