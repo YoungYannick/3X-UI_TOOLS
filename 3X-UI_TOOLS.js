@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         3X-UI多功能脚本
 // @namespace    http://tampermonkey.net/
-// @version      1.7
-// @description  3X-UI一键生成节点 (VLESS/VMESS/SS) & 一键关闭订阅访问 & 一键添加出站规则 & 一键配置路由规则 & 一键配删除入站节点 & 节点链接展示
+// @version      1.8
+// @description  3X-UI 多功能工具：一键创建/查看/删除节点、关闭订阅、出站/路由配置，适配 2.x/3.x
 // @icon         https://avatars.githubusercontent.com/u/86963023
 // @author       Yannick Young
 // @match        *://*/*/panel/*
@@ -23,9 +23,10 @@
       generateLinks(inbound, address) {
         this.address = address || this.address;
         const links = [];
+        const missingEmails = [];
         try {
-          const settings = JSON.parse(inbound.settings);
-          const streamSettings = JSON.parse(inbound.streamSettings);
+          const settings = this.safeJsonParse(inbound.settings, {});
+          const streamSettings = this.safeJsonParse(inbound.streamSettings, {});
           const clients = settings.clients || [];
           if (inbound.protocol === 'shadowsocks' && clients.length === 0) {
             const method = settings.method || '';
@@ -36,16 +37,17 @@
                 password: settings.password || ''
               };
               const link = this.getLink(inbound, virtualClient, streamSettings);
-              if (link) {
-                links.push(link);
-              }
+              this.pushLinks(links, link);
             }
+          } else if (['socks', 'http', 'mixed'].includes(inbound.protocol)) {
+            this.pushLinks(links, this.getLink(inbound, {}, streamSettings));
           } else {
             clients.forEach(client => {
               if (client.enable !== false) {
                 const link = this.getLink(inbound, client, streamSettings);
-                if (link) {
-                  links.push(link);
+                this.pushLinks(links, link);
+                if (!link && client.email) {
+                  missingEmails.push(client.email);
                 }
               }
             });
@@ -53,7 +55,7 @@
         } catch (error) {
           console.error('生成链接失败:', error);
         }
-        return links;
+        return { links, missingEmails: Array.from(new Set(missingEmails)) };
       }
 
       getLink(inbound, client, streamSettings) {
@@ -66,19 +68,28 @@
             return this.genTrojanLink(inbound, client, streamSettings);
           case 'shadowsocks':
             return this.genShadowsocksLink(inbound, client, streamSettings);
+          case 'hysteria':
+            return this.genHysteriaLink(inbound, client, streamSettings);
+          case 'socks':
+            return this.genSocksLink(inbound, streamSettings);
+          case 'http':
+            return this.genHttpLink(inbound, streamSettings);
+          case 'mixed':
+            return [this.genSocksLink(inbound, streamSettings), this.genHttpLink(inbound, streamSettings)].filter(Boolean);
           default:
             return '';
         }
       }
 
       genVlessLink(inbound, client, stream) {
-        const address = this.address;
+        const address = this.resolveInboundAddress(inbound);
         const port = inbound.port;
-        const uuid = client.id;
+        const uuid = client.id || client.uuid;
+        if (!uuid) return '';
         const streamNetwork = stream.network || 'tcp';
         const params = new URLSearchParams();
         params.set('type', streamNetwork);
-        const settings = JSON.parse(inbound.settings);
+        const settings = this.safeJsonParse(inbound.settings, {});
         if (settings.encryption) {
           params.set('encryption', settings.encryption);
         }
@@ -98,18 +109,15 @@
       }
 
       genVmessLink(inbound, client, stream) {
-        const externalProxies = stream.externalProxy || [];
-        if (externalProxies.length > 0) {
-          return this.genVmessMultipleLinks(obj, externalProxies, inbound, client.email, security);
-        }
         const obj = {
           v: '2',
           ps: this.genRemark(inbound, client.email || '', ''),
-          add: this.address,
+          add: this.resolveInboundAddress(inbound),
           port: inbound.port,
-          id: client.id,
+          id: client.id || client.uuid,
           scy: client.security || ''
         };
+        if (!obj.id) return '';
         const streamNetwork = stream.network || 'tcp';
         obj.net = streamNetwork;
         const security = stream.security || 'none';
@@ -137,14 +145,19 @@
         if (security === 'tls') {
           this.handleVmessTls(stream, obj);
         }
+        const externalProxies = stream.externalProxy || [];
+        if (externalProxies.length > 0) {
+          return this.genVmessMultipleLinks(obj, externalProxies, inbound, client.email, security);
+        }
         const jsonStr = JSON.stringify(obj, null, 2);
         return 'vmess://' + btoa(jsonStr);
       }
 
       genTrojanLink(inbound, client, stream) {
-        const address = this.address;
+        const address = this.resolveInboundAddress(inbound);
         const port = inbound.port;
         const password = client.password;
+        if (!password) return '';
         const streamNetwork = stream.network || 'tcp';
         const params = new URLSearchParams();
         params.set('type', streamNetwork);
@@ -164,11 +177,12 @@
       }
 
       genShadowsocksLink(inbound, client, stream) {
-        const address = this.address;
+        const address = this.resolveInboundAddress(inbound);
         const port = inbound.port;
-        const settings = JSON.parse(inbound.settings);
+        const settings = this.safeJsonParse(inbound.settings, {});
         const method = settings.method;
         const inboundPassword = settings.password || '';
+        if (!method || !client.password) return '';
         let encPart = `${method}:${client.password}`;
         if (method && method.startsWith('2022-')) {
           if (client.password === inboundPassword) {
@@ -197,6 +211,65 @@
         });
         url.hash = this.genRemark(inbound, client.email, '');
         return url.toString();
+      }
+
+      genHysteriaLink(inbound, client, stream) {
+        const settings = this.safeJsonParse(inbound.settings, {});
+        const auth = this.encodeUserinfo(client.auth || client.password || settings.auth || '');
+        if (!auth) {
+          return '';
+        }
+        const protocol = Number(settings.version) === 1 ? 'hysteria' : 'hysteria2';
+        const params = new URLSearchParams();
+        params.set('security', 'tls');
+        this.handleHysteriaTlsParams(stream, params);
+        this.handleHysteriaFinalMask(stream, params);
+
+        const externalProxies = stream.externalProxy || [];
+        if (externalProxies.length > 0) {
+          const links = [];
+          externalProxies.forEach(ep => {
+            if (!ep.dest || !ep.port) return;
+            const epParams = new URLSearchParams(params);
+            this.applyExternalProxyHysteriaParams(ep, epParams);
+            const url = new URL(`${protocol}://${auth}@${ep.dest}:${ep.port}`);
+            epParams.forEach((value, key) => url.searchParams.set(key, value));
+            url.hash = this.genRemark(inbound, client.email, ep.remark || '') || this.getNodeDisplayName(inbound, client.email);
+            links.push(url.toString());
+          });
+          return links;
+        }
+
+        const hopPorts = stream.finalmask?.quicParams?.udpHop?.ports;
+        if (hopPorts) {
+          params.set('mport', String(hopPorts).trim());
+        }
+        const url = new URL(`${protocol}://${auth}@${this.resolveInboundAddress(inbound)}:${inbound.port}`);
+        params.forEach((value, key) => url.searchParams.set(key, value));
+        url.hash = this.genRemark(inbound, client.email, '') || this.getNodeDisplayName(inbound, client.email);
+        return url.toString();
+      }
+
+      genSocksLink(inbound) {
+        const settings = this.safeJsonParse(inbound.settings, {});
+        return this.genAccountLinks('socks5', inbound, settings);
+      }
+
+      genHttpLink(inbound, stream) {
+        const settings = this.safeJsonParse(inbound.settings, {});
+        const scheme = (stream.security || 'none') === 'tls' ? 'https' : 'http';
+        return this.genAccountLinks(scheme, inbound, settings);
+      }
+
+      genAccountLinks(scheme, inbound, settings) {
+        const address = this.resolveInboundAddress(inbound);
+        const accounts = Array.isArray(settings.accounts) ? settings.accounts : [];
+        if (accounts.length === 0 || settings.auth === 'noauth') {
+          return `${scheme}://${address}:${inbound.port}`;
+        }
+        return accounts
+          .filter(account => account && account.user !== undefined && account.pass !== undefined)
+          .map(account => `${scheme}://${this.encodeUserinfo(account.user)}:${this.encodeUserinfo(account.pass)}@${address}:${inbound.port}`);
       }
 
       handleStreamSettings(stream, streamNetwork, params) {
@@ -345,6 +418,78 @@
         if (settings.allowInsecure) {
           params.set('allowInsecure', '1');
         }
+      }
+
+      handleHysteriaTlsParams(stream, params) {
+        const tlsSetting = stream.tlsSettings || {};
+        const alpns = tlsSetting.alpn || [];
+        if (alpns.length > 0) {
+          params.set('alpn', alpns.join(','));
+        }
+        if (tlsSetting.serverName) {
+          params.set('sni', tlsSetting.serverName);
+        }
+        const settings = tlsSetting.settings || {};
+        if (settings.fingerprint) {
+          params.set('fp', settings.fingerprint);
+        }
+        if (settings.echConfigList) {
+          params.set('ech', settings.echConfigList);
+        }
+        const pins = settings.pinnedPeerCertSha256 || [];
+        if (pins.length > 0) {
+          params.set('pinSHA256', pins.map(pin => this.hysteriaPinHex(pin)).join(','));
+        }
+      }
+
+      handleHysteriaFinalMask(stream, params) {
+        const finalmask = stream.finalmask || {};
+        this.setFinalMaskParam(finalmask, params);
+        const udpMasks = finalmask.udp || [];
+        for (const mask of udpMasks) {
+          if (mask?.type !== 'salamander') continue;
+          const password = mask.settings?.password || '';
+          if (password) {
+            params.set('obfs', 'salamander');
+            params.set('obfs-password', password);
+            break;
+          }
+        }
+      }
+
+      setFinalMaskParam(finalmask, params) {
+        if (!finalmask || Object.keys(finalmask).length === 0) return;
+        const normalized = {};
+        if (Array.isArray(finalmask.tcp) && finalmask.tcp.length > 0) normalized.tcp = finalmask.tcp;
+        if (Array.isArray(finalmask.udp) && finalmask.udp.length > 0) normalized.udp = finalmask.udp;
+        if (finalmask.quicParams && Object.keys(finalmask.quicParams).length > 0) normalized.quicParams = finalmask.quicParams;
+        if (Object.keys(normalized).length > 0) {
+          params.set('fm', JSON.stringify(normalized));
+        }
+      }
+
+      applyExternalProxyHysteriaParams(ep, params) {
+        const pins = ep.pinnedPeerCertSha256 || [];
+        if (Array.isArray(pins) && pins.length > 0) {
+          params.set('pinSHA256', pins.map(pin => this.hysteriaPinHex(pin)).join(','));
+        }
+      }
+
+      hysteriaPinHex(pin) {
+        const value = String(pin || '').trim();
+        const hex = value.replace(/:/g, '');
+        if (/^[0-9a-fA-F]{64}$/.test(hex)) {
+          return hex.toLowerCase();
+        }
+        try {
+          const normalized = value.replace(/-/g, '+').replace(/_/g, '/');
+          const padded = normalized + '='.repeat((4 - normalized.length % 4) % 4);
+          const binary = atob(padded);
+          if (binary.length === 32) {
+            return Array.from(binary, char => char.charCodeAt(0).toString(16).padStart(2, '0')).join('');
+          }
+        } catch (e) {}
+        return value;
       }
 
       handleRealityParams(stream, params) {
@@ -616,6 +761,46 @@
         return '';
       }
 
+      safeJsonParse(value, fallback) {
+        if (!value) return fallback;
+        if (typeof value === 'object') return value;
+        try {
+          return JSON.parse(value);
+        } catch (e) {
+          return fallback;
+        }
+      }
+
+      pushLinks(target, value) {
+        if (!value) return;
+        const items = Array.isArray(value) ? value : String(value).split('\n');
+        items.forEach(item => {
+          const link = String(item || '').trim();
+          if (link) target.push(link);
+        });
+      }
+
+      encodeUserinfo(value) {
+        return encodeURIComponent(String(value || ''));
+      }
+
+      resolveInboundAddress(inbound) {
+        const listen = inbound.listen || inbound.Listen || '';
+        if (listen && !listen.startsWith('@') && !listen.startsWith('/') && this.isRoutableHost(listen)) {
+          return listen;
+        }
+        return this.address;
+      }
+
+      isRoutableHost(host) {
+        const value = String(host || '').trim().toLowerCase();
+        return !!value && !['0.0.0.0', '::', '::1', 'localhost', '127.0.0.1'].includes(value);
+      }
+
+      getNodeDisplayName(inbound, email) {
+        return inbound.remark || inbound.tag || email || `${(inbound.protocol || 'NODE').toUpperCase()}-${inbound.port || inbound.id || ''}`;
+      }
+
       randomString(length) {
         const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
         let result = '';
@@ -643,14 +828,25 @@
           if (!this.isNodeValid(inbound)) {
             return;
           }
-          const links = this.generateLinks(inbound, address);
+          const generated = this.generateLinks(inbound, address);
+          const links = Array.isArray(generated) ? generated : generated.links;
           if (links.length > 0) {
             results.push({
               id: inbound.id,
-              remark: inbound.remark,
+              remark: this.getNodeDisplayName(inbound, ''),
               protocol: inbound.protocol,
               port: inbound.port,
-              links: links
+              links: links,
+              missingEmails: generated.missingEmails || []
+            });
+          } else if (generated.missingEmails?.length > 0) {
+            results.push({
+              id: inbound.id,
+              remark: this.getNodeDisplayName(inbound, ''),
+              protocol: inbound.protocol,
+              port: inbound.port,
+              links: [],
+              missingEmails: generated.missingEmails
             });
           }
         });
@@ -864,6 +1060,20 @@
         setTimeout(() => t.remove(), 3000);
     }
 
+    function escapeHtml(value) {
+        return String(value ?? '').replace(/[&<>"']/g, char => ({
+            '&': '&amp;',
+            '<': '&lt;',
+            '>': '&gt;',
+            '"': '&quot;',
+            "'": '&#39;'
+        }[char]));
+    }
+
+    function getInboundDisplayName(inbound) {
+        return inbound.remark || inbound.tag || `${(inbound.protocol || 'NODE').toUpperCase()}-${inbound.port || inbound.id || ''}`;
+    }
+
     function getBasePath() {
         const pathname = window.location.pathname;
         const match = pathname.match(/(.*)\/(panel|xui)\//);
@@ -871,10 +1081,524 @@
         return `${window.location.origin}${prefix}`;
     }
 
+    let CSRF_TOKEN = '';
+    let PANEL_MAJOR_VERSION;
+
+    function isUnsafeMethod(method) {
+        return !['GET', 'HEAD', 'OPTIONS', 'TRACE'].includes(String(method || 'GET').toUpperCase());
+    }
+
+    function parseMajorVersion(value) {
+        const match = String(value || '').match(/v?(\d+)/i);
+        return match ? Number(match[1]) : 0;
+    }
+
+    async function getPanelMajorVersion() {
+        if (typeof PANEL_MAJOR_VERSION === 'number') return PANEL_MAJOR_VERSION;
+        try {
+            const data = await rawXhrJson(`${getBasePath()}/panel/api/server/getPanelUpdateInfo`, {
+                method: 'GET',
+                skipCsrf: true
+            });
+            const version = data?.obj?.currentVersion || data?.obj?.latestVersion || '';
+            PANEL_MAJOR_VERSION = parseMajorVersion(version);
+        } catch (e) {
+            PANEL_MAJOR_VERSION = 2;
+        }
+        return PANEL_MAJOR_VERSION;
+    }
+
+    async function isPanelV3() {
+        return (await getPanelMajorVersion()) >= 3;
+    }
+
+    function extractCsrfToken(data) {
+        if (typeof data === 'string') return data.trim();
+        return data?.obj || data?.csrfToken || data?.csrf_token || data?.token || data?.csrf || data?._csrf ||
+            data?.data?.csrfToken || data?.data?.csrf_token || data?.data?.token || '';
+    }
+
+    function getPageCsrfToken() {
+        const el = document.querySelector(
+            'meta[name="csrf-token"],meta[name="csrf_token"],meta[name="_csrf"],input[name="csrf-token"],input[name="csrf_token"],input[name="_csrf"]'
+        );
+        return (el?.content || el?.value || '').trim();
+    }
+
+    async function fetchCsrfToken() {
+        const pageToken = getPageCsrfToken();
+        if (pageToken) {
+            CSRF_TOKEN = pageToken;
+            return CSRF_TOKEN;
+        }
+
+        const data = await rawXhrJson(`${getBasePath()}/csrf-token`, { method: 'GET', skipCsrf: true });
+        const token = extractCsrfToken(data);
+        if (token) {
+            CSRF_TOKEN = token;
+            return CSRF_TOKEN;
+        }
+        throw new Error(data?.msg || '获取 CSRF Token 失败');
+    }
+
+    async function ensureCsrfToken() {
+        return CSRF_TOKEN || fetchCsrfToken();
+    }
+
+    async function rawXhrJson(url, options = {}) {
+        return new Promise((resolve, reject) => {
+            const xhr = new XMLHttpRequest();
+            xhr.open(options.method || 'GET', url, true);
+            xhr.withCredentials = true;
+            xhr.setRequestHeader('Accept', 'application/json');
+            xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+            if (options.csrfToken) {
+                xhr.setRequestHeader('X-CSRF-Token', options.csrfToken);
+            }
+            Object.entries(options.headers || {}).forEach(([key, value]) => {
+                xhr.setRequestHeader(key, value);
+            });
+            xhr.onload = () => {
+                if (xhr.status < 200 || xhr.status >= 300) {
+                    const err = new Error(`HTTP ${xhr.status} ${xhr.statusText || ''}`.trim());
+                    err.status = xhr.status;
+                    err.url = url;
+                    err.responseText = xhr.responseText || '';
+                    reject(err);
+                    return;
+                }
+                try {
+                    resolve(xhr.responseText ? JSON.parse(xhr.responseText) : {});
+                } catch (e) {
+                    resolve(xhr.responseText || {});
+                }
+            };
+            xhr.onerror = () => reject(new Error('网络请求失败'));
+            xhr.send(options.body || null);
+        });
+    }
+
+    async function fetchJson(url, options = {}) {
+        const requestOptions = { ...options };
+        const needsCsrf = !requestOptions.skipCsrf && isUnsafeMethod(requestOptions.method) && await isPanelV3();
+        if (needsCsrf) {
+            requestOptions.csrfToken = await ensureCsrfToken();
+        }
+        try {
+            return await rawXhrJson(url, requestOptions);
+        } catch (e) {
+            if (needsCsrf && e.status === 403) {
+                CSRF_TOKEN = '';
+                requestOptions.csrfToken = await fetchCsrfToken();
+                return rawXhrJson(url, requestOptions);
+            }
+            throw e;
+        }
+    }
+
+    async function fetchJsonFallback(requests) {
+        let lastError;
+        for (const request of requests) {
+            try {
+                const data = await fetchJson(request.url, request.options || {});
+                if (data && data.success !== false) return data;
+                lastError = new Error(data?.msg || '请求失败');
+            } catch (e) {
+                lastError = e;
+                if (e.status === 403 && request.stopFallbackOn403) {
+                    throw e;
+                }
+            }
+        }
+        throw lastError || new Error('请求失败');
+    }
+
+    async function fetchByPanelVersion(v3Request, legacyRequest) {
+        if (await isPanelV3()) {
+            return fetchJsonFallback([v3Request, legacyRequest]);
+        }
+        return fetchJsonFallback([legacyRequest, v3Request]);
+    }
+
+    function inboundNeedsDetail(inbound) {
+        const settings = typeof inbound.settings === 'string' ? (() => {
+            try { return JSON.parse(inbound.settings); } catch (e) { return null; }
+        })() : inbound.settings;
+        const streamSettings = typeof inbound.streamSettings === 'string' ? (() => {
+            try { return JSON.parse(inbound.streamSettings); } catch (e) { return null; }
+        })() : inbound.streamSettings;
+        const clients = settings?.clients || [];
+        const needsClientSecret = ['vmess', 'vless', 'trojan', 'shadowsocks', 'hysteria'].includes(inbound.protocol);
+        const strippedClient = needsClientSecret && clients.length > 0 && clients.some(client =>
+            !client.id && !client.uuid && !client.password && !client.auth
+        );
+        return !settings || !streamSettings || strippedClient;
+    }
+
+    async function getInboundDetail(id) {
+        if (await isPanelV3()) {
+            return fetchJsonFallback([
+                { url: `${getBasePath()}/panel/api/inbounds/get/${id}`, options: { method: 'GET' } },
+                { url: `${getBasePath()}/panel/api/inbounds/get/${id}`, options: { method: 'POST' } },
+                { url: `${getBasePath()}/panel/inbound/get/${id}`, options: { method: 'POST' } }
+            ]);
+        }
+        return fetchJsonFallback([
+            { url: `${getBasePath()}/panel/inbound/get/${id}`, options: { method: 'POST' } },
+            { url: `${getBasePath()}/panel/api/inbounds/get/${id}`, options: { method: 'GET' } },
+            { url: `${getBasePath()}/panel/api/inbounds/get/${id}`, options: { method: 'POST' } }
+        ]);
+    }
+
+    async function hydrateInbounds(data) {
+        if (!data?.success || !Array.isArray(data.obj)) return data;
+        const hydrated = [];
+        for (const inbound of data.obj) {
+            if (inboundNeedsDetail(inbound)) {
+                try {
+                    const detail = await getInboundDetail(inbound.id);
+                    hydrated.push(detail.success && detail.obj ? { ...inbound, ...detail.obj } : inbound);
+                } catch (e) {
+                    hydrated.push(inbound);
+                }
+            } else {
+                hydrated.push(inbound);
+            }
+        }
+        return { ...data, obj: hydrated };
+    }
+
+    async function getInbounds(options = {}) {
+        const isXUI = window.location.pathname.includes('/xui/');
+        let data;
+        if (isXUI) {
+            data = await fetchJsonFallback([
+                { url: `${getBasePath()}/xui/inbound/list`, options: { method: 'POST' } },
+                { url: `${getBasePath()}/panel/api/inbounds/list`, options: { method: 'GET' } }
+            ]);
+        } else {
+            data = await fetchByPanelVersion(
+                { url: `${getBasePath()}/panel/api/inbounds/list`, options: { method: 'GET' } },
+                { url: `${getBasePath()}/panel/inbound/list`, options: { method: 'POST' } }
+            );
+        }
+        return options.full ? hydrateInbounds(data) : data;
+    }
+
+    async function getXrayConfigResponse() {
+        return fetchByPanelVersion(
+            { url: `${getBasePath()}/panel/api/xray/`, options: { method: 'POST' } },
+            { url: `${getBasePath()}/panel/xray/`, options: { method: 'POST' } }
+        );
+    }
+
+    function parseXrayConfigResponse(data) {
+        const raw = data.obj?.xraySetting ?? data.obj;
+        if (typeof raw === 'string') {
+            const parsed = JSON.parse(raw);
+            return parsed.xraySetting ? parsed.xraySetting : parsed;
+        }
+        return raw?.xraySetting ? raw.xraySetting : raw;
+    }
+
+    async function updateXrayConfig(xraySetting) {
+        const formData = new URLSearchParams();
+        formData.append('xraySetting', JSON.stringify(xraySetting));
+        return fetchByPanelVersion(
+            { url: `${getBasePath()}/panel/api/xray/update`, options: { method: 'POST', body: formData } },
+            { url: `${getBasePath()}/panel/xray/update`, options: { method: 'POST', body: formData } }
+        );
+    }
+
+    function cloneInboundPayload(payload) {
+        return {
+            ...payload,
+            settings: typeof payload.settings === 'string' ? JSON.parse(payload.settings) : payload.settings,
+            streamSettings: typeof payload.streamSettings === 'string' ? JSON.parse(payload.streamSettings) : payload.streamSettings,
+            sniffing: typeof payload.sniffing === 'string' ? JSON.parse(payload.sniffing) : payload.sniffing
+        };
+    }
+
+    function legacyInboundPayload(payload) {
+        return {
+            ...payload,
+            settings: typeof payload.settings === 'string' ? payload.settings : JSON.stringify(payload.settings),
+            streamSettings: typeof payload.streamSettings === 'string' ? payload.streamSettings : JSON.stringify(payload.streamSettings),
+            sniffing: typeof payload.sniffing === 'string' ? payload.sniffing : JSON.stringify(payload.sniffing)
+        };
+    }
+
+    function getPayloadSettings(payload) {
+        return typeof payload.settings === 'string' ? JSON.parse(payload.settings) : (payload.settings || {});
+    }
+
+    function getPayloadClients(payload) {
+        const settings = getPayloadSettings(payload);
+        return Array.isArray(settings.clients) ? settings.clients : [];
+    }
+
+    function inboundPayloadWithoutClients(payload) {
+        const next = cloneInboundPayload(payload);
+        next.settings = { ...(next.settings || {}), clients: [] };
+        return next;
+    }
+
+    function normalizeClientForApi(client, protocol) {
+        const normalized = {
+            email: client.email,
+            totalGB: Number(client.totalGB || 0),
+            expiryTime: Number(client.expiryTime || 0),
+            tgId: Number(client.tgId || 0),
+            limitIp: Number(client.limitIp || 0),
+            enable: client.enable !== false,
+            subId: client.subId || randomLowerAndNum(16),
+            flow: client.flow || '',
+            comment: client.comment || '',
+            reset: Number(client.reset || 0),
+            security: client.security || (protocol === 'vmess' ? 'auto' : '')
+        };
+        ['id', 'uuid', 'password', 'auth', 'group'].forEach(key => {
+            if (client[key]) normalized[key] = client[key];
+        });
+        if (client.reverse) normalized.reverse = client.reverse;
+        return normalized;
+    }
+
+    let CLIENTS_API_AVAILABLE;
+
+    async function hasClientsApi() {
+        if (typeof CLIENTS_API_AVAILABLE === 'boolean') return CLIENTS_API_AVAILABLE;
+        try {
+            const data = await fetchJson(`${getBasePath()}/panel/api/clients/list`, { method: 'GET' });
+            CLIENTS_API_AVAILABLE = data && data.success !== false;
+        } catch (e) {
+            if (e.status === 403) throw e;
+            CLIENTS_API_AVAILABLE = false;
+        }
+        return CLIENTS_API_AVAILABLE;
+    }
+
+    async function addInbound(payload) {
+        const v3Nested = {
+                url: `${getBasePath()}/panel/api/inbounds/add`,
+                options: {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(cloneInboundPayload(payload))
+                }
+            };
+        const v3Legacy = {
+                url: `${getBasePath()}/panel/api/inbounds/add`,
+                options: {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(legacyInboundPayload(payload))
+                }
+            };
+        const legacy = {
+            url: `${getBasePath()}/panel/inbound/add`,
+            options: {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(legacyInboundPayload(payload))
+            }
+        };
+        return (await isPanelV3()) ? fetchJsonFallback([v3Nested, v3Legacy, legacy]) : fetchJsonFallback([legacy, v3Nested, v3Legacy]);
+    }
+
+    async function findInboundIdByPayload(payload) {
+        const data = await getInbounds();
+        if (!data.success || !Array.isArray(data.obj)) throw new Error('创建成功但无法确认入站ID');
+        const found = data.obj.find(item =>
+            Number(item.port) === Number(payload.port) &&
+            item.protocol === payload.protocol &&
+            getInboundDisplayName(item) === payload.remark
+        ) || data.obj.find(item => Number(item.port) === Number(payload.port) && item.protocol === payload.protocol);
+        if (!found?.id) throw new Error('创建成功但无法确认入站ID');
+        return found.id;
+    }
+
+    async function resolveCreatedInboundId(data, payload) {
+        const obj = data?.obj;
+        if (typeof obj === 'number' || typeof obj === 'string') return obj;
+        if (obj?.id) return obj.id;
+        if (obj?.inbound?.id) return obj.inbound.id;
+        if (data?.id) return data.id;
+        return findInboundIdByPayload(payload);
+    }
+
+    async function addClientToInbound(client, inboundId, protocol) {
+        const body = {
+            client: normalizeClientForApi(client, protocol),
+            inboundIds: [Number(inboundId)]
+        };
+        const data = await fetchJson(`${getBasePath()}/panel/api/clients/add`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        });
+        if (data.success === false && /exist|存在|duplicate|重复/i.test(data.msg || '')) {
+            const encodedEmail = encodeURIComponent(client.email);
+            return fetchJson(`${getBasePath()}/panel/api/clients/${encodedEmail}/attach`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ inboundIds: [Number(inboundId)] })
+            });
+        }
+        return data;
+    }
+
+    async function createInboundWithClients(payload) {
+        if (!(await hasClientsApi())) {
+            return addInbound(payload);
+        }
+
+        const clients = getPayloadClients(payload);
+        if (clients.length === 0) {
+            return addInbound(payload);
+        }
+
+        const inboundPayload = inboundPayloadWithoutClients(payload);
+        const inboundData = await addInbound(inboundPayload);
+        if (!inboundData.success) return inboundData;
+
+        const inboundId = await resolveCreatedInboundId(inboundData, inboundPayload);
+        try {
+            for (const client of clients) {
+                const clientData = await addClientToInbound(client, inboundId, payload.protocol);
+                if (!clientData.success) throw new Error(clientData.msg || `客户端 ${client.email} 创建失败`);
+            }
+        } catch (e) {
+            try {
+                await deleteInboundOnly(inboundId);
+            } catch (_) {}
+            throw e;
+        }
+        return inboundData;
+    }
+
+    async function getClientsList() {
+        return fetchJson(`${getBasePath()}/panel/api/clients/list`, { method: 'GET' });
+    }
+
+    async function deleteClient(email) {
+        const encodedEmail = encodeURIComponent(email);
+        return fetchJson(`${getBasePath()}/panel/api/clients/del/${encodedEmail}?keepTraffic=0`, { method: 'POST' });
+    }
+
+    async function deleteInboundOnly(id) {
+        return fetchByPanelVersion(
+            { url: `${getBasePath()}/panel/api/inbounds/del/${id}`, options: { method: 'POST' } },
+            { url: `${getBasePath()}/panel/inbound/del/${id}`, options: { method: 'POST' } }
+        );
+    }
+
+    function getInboundClientEmails(inbound, clientRows) {
+        const emails = new Set();
+        if (Array.isArray(clientRows)) {
+            clientRows.forEach(client => {
+                const inboundIds = Array.isArray(client.inboundIds) ? client.inboundIds : [];
+                if (inboundIds.map(Number).includes(Number(inbound.id)) && client.email) emails.add(client.email);
+            });
+        }
+        try {
+            const settings = typeof inbound.settings === 'string' ? JSON.parse(inbound.settings) : inbound.settings;
+            (settings?.clients || []).forEach(client => {
+                if (client.email) emails.add(client.email);
+            });
+        } catch (_) {}
+        return Array.from(emails);
+    }
+
+    function isClientlessShadowsocks2022(inbound) {
+        if (inbound.protocol !== 'shadowsocks') return false;
+        try {
+            const settings = typeof inbound.settings === 'string' ? JSON.parse(inbound.settings) : inbound.settings;
+            return settings?.method === '2022-blake3-chacha20-poly1305';
+        } catch (_) {
+            return false;
+        }
+    }
+
+    async function deleteInboundWithClients(inbound, clientRows) {
+        if (await hasClientsApi()) {
+            const emails = getInboundClientEmails(inbound, clientRows);
+            if (emails.length === 0) {
+                if (!isClientlessShadowsocks2022(inbound)) {
+                    throw new Error('新版客户端模型未找到该入站绑定的用户，已停止删除以避免残留客户端');
+                }
+                return deleteInboundOnly(inbound.id);
+            }
+            for (const email of emails) {
+                const data = await deleteClient(email);
+                if (!data.success) throw new Error(data.msg || `客户端 ${email} 删除失败`);
+            }
+        }
+        return deleteInboundOnly(inbound.id);
+    }
+
+    async function getClientLinks(email) {
+        if (!(await isPanelV3())) {
+            return { success: false, obj: [] };
+        }
+        const encodedEmail = encodeURIComponent(email);
+        return fetchJsonFallback([
+            { url: `${getBasePath()}/panel/api/clients/links/${encodedEmail}`, options: { method: 'GET' } }
+        ]);
+    }
+
+    async function fillMissingClientLinks(results) {
+        for (const item of results) {
+            if (!item.missingEmails || item.missingEmails.length === 0) continue;
+            for (const email of item.missingEmails) {
+                try {
+                    const data = await getClientLinks(email);
+                    const links = Array.isArray(data.obj) ? data.obj : [];
+                    const portNeedle = `:${item.port}`;
+                    links
+                        .filter(link => typeof link === 'string' && link.includes(portNeedle))
+                        .forEach(link => {
+                            if (!item.links.includes(link)) item.links.push(link);
+                        });
+                } catch (e) {}
+            }
+        }
+        return results.filter(item => item.links.length > 0);
+    }
+
+    async function getPanelSettingsRaw() {
+        return fetchByPanelVersion(
+            { url: `${getBasePath()}/panel/api/setting/all`, options: { method: 'POST', headers: { 'Content-Type': 'application/json' } }, stopFallbackOn403: true },
+            { url: `${getBasePath()}/panel/setting/all`, options: { method: 'POST' } }
+        );
+    }
+
+    async function updatePanelSettings(settings) {
+        return fetchByPanelVersion(
+            { url: `${getBasePath()}/panel/api/setting/update`, options: { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(settings) }, stopFallbackOn403: true },
+            { url: `${getBasePath()}/panel/setting/update`, options: { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(settings) } }
+        );
+    }
+
+    async function restartPanel() {
+        return fetchByPanelVersion(
+            { url: `${getBasePath()}/panel/api/setting/restartPanel`, options: { method: 'POST', headers: { 'Content-Type': 'application/json' } }, stopFallbackOn403: true },
+            { url: `${getBasePath()}/panel/setting/restartPanel`, options: { method: 'POST', headers: { 'Content-Type': 'application/json' } } }
+        );
+    }
+
+    async function restartXrayService() {
+        const v3 = { url: `${getBasePath()}/panel/api/server/restartXrayService`, options: { method: 'POST', headers: { 'Content-Type': 'application/json' } } };
+        const legacy = { url: `${getBasePath()}/panel/xray/restart`, options: { method: 'POST', headers: { 'Content-Type': 'application/json' } } };
+        return fetchByPanelVersion(v3, legacy);
+    }
+
     async function getKeys() {
         try {
-            const res = await fetch(`${getBasePath()}/panel/api/server/getNewX25519Cert`);
-            const data = await res.json();
+            const data = await fetchByPanelVersion(
+                { url: `${getBasePath()}/panel/api/server/getNewX25519Cert`, options: { method: 'GET' } },
+                { url: `${getBasePath()}/panel/server/getNewX25519Cert`, options: { method: 'GET' } }
+            );
             if (data.success && data.obj) return data.obj;
             throw new Error(data.msg || '未知错误');
         } catch (e) {
@@ -884,8 +1608,10 @@
 
     async function getVlessEnc() {
         try {
-            const res = await fetch(`${getBasePath()}/panel/api/server/getNewVlessEnc`);
-            const data = await res.json();
+            const data = await fetchByPanelVersion(
+                { url: `${getBasePath()}/panel/api/server/getNewVlessEnc`, options: { method: 'GET' } },
+                { url: `${getBasePath()}/panel/server/getNewVlessEnc`, options: { method: 'GET' } }
+            );
             if (data.success && data.obj && data.obj.auths && data.obj.auths.length >= 2) return data.obj.auths[1];
             throw new Error(data.msg || '未知错误');
         } catch (e) {
@@ -898,8 +1624,7 @@
             return Math.floor(Math.random() * (60000 - 10000 + 1)) + 10000;
         }
         try {
-            const res = await fetch(`${getBasePath()}/panel/api/inbounds/list`);
-            const data = await res.json();
+            const data = await getInbounds();
             if (!data.success) throw new Error("无法获取端口列表");
             const usedPorts = new Set(data.obj.map(i => i.port));
             let port = parseInt(CONFIG.startPort, 10);
@@ -947,8 +1672,7 @@
 
     async function getPanelSettings() {
         try {
-            const res = await fetch(`${getBasePath()}/panel/setting/all`, { method: 'POST' });
-            const data = await res.json();
+            const data = await getPanelSettingsRaw();
             if (data.success) return data.obj;
             throw new Error(data.msg || '未知错误');
         } catch (e) {
@@ -965,6 +1689,7 @@
         'vless_ws_tls': 'VLESS_WS_TLS',
         'vmess_ws': 'VMESS_WS',
         'vmess_ws_tls': 'VMESS_WS_TLS',
+        'hysteria2': 'HYSTERIA2_TLS',
         'ss_blake3_chacha20_poly1305': 'SS_TCP_2022_BLAKE3_CHACHA20_POLY1305',
         'ss_blake3_aes_256_gcm': 'SS_TCP_2022_BLAKE3_AES_256_GCM',
         'ss_blake3_aes_128_gcm': 'SS_TCP_2022_BLAKE3_AES_128_GCM'
@@ -993,10 +1718,10 @@
         let fullName = PROTOCOL_FULL_NAMES[type] || type.toUpperCase();
         const tag = `${fullName}-${port}`;
 
-        const isTls = type.endsWith('_tls');
+        const isTls = type.endsWith('_tls') || type === 'hysteria2';
         let panelSettings;
         if (isTls) {
-            if (location.protocol !== 'https:') {
+            if (type !== 'hysteria2' && location.protocol !== 'https:') {
                 toast('TLS节点需要HTTPS访问面板', 'error');
                 return false;
             }
@@ -1116,18 +1841,14 @@
                     }
                 };
             }
-        } else if (type.startsWith('ss_')) {
-            protocol = "shadowsocks";
-            const method = '2022-' + type.replace('ss_', '').replace(/_/g, '-');
-            let keyLength;
-            if (method.includes('aes-128')) keyLength = 16;
-            else keyLength = 32;
-            const password = randomBase64(keyLength);
-            let clients = [];
-            if (method.includes('aes-')) {
-                const clientPassword = randomBase64(keyLength);
-                clients = [{
-                    password: clientPassword,
+        } else if (type === 'hysteria2') {
+            protocol = "hysteria";
+            const auth = randomLowerAndNum(20);
+            settings = JSON.stringify({
+                version: 2,
+                clients: [{
+                    id: uid,
+                    auth: auth,
                     email: email,
                     subId: subId,
                     limitIp: 0,
@@ -1137,8 +1858,69 @@
                     tgId: "",
                     comment: "",
                     reset: 0
-                }];
-            }
+                }]
+            });
+            stream = {
+                network: "hysteria",
+                security: "tls",
+                externalProxy: [],
+                hysteriaSettings: {
+                    version: 2,
+                    auth: auth,
+                    udpIdleTimeout: 60,
+                    masquerade: {
+                        type: "proxy",
+                        proxy: {
+                            url: "https://www.apple.com",
+                            rewriteHost: true
+                        }
+                    }
+                },
+                tlsSettings: {
+                    serverName: panelSettings.webDomain,
+                    minVersion: "1.2",
+                    maxVersion: "1.3",
+                    cipherSuites: "",
+                    rejectUnknownSni: false,
+                    verifyPeerCertInNames: [],
+                    disableSystemRoot: false,
+                    enableSessionResumption: false,
+                    certificates: [{
+                        certificateFile: panelSettings.webCertFile,
+                        keyFile: panelSettings.webKeyFile,
+                        oneTimeLoading: false,
+                        usage: "encipherment",
+                        buildChain: false
+                    }],
+                    alpn: ["h3"],
+                    echServerKeys: "",
+                    echForceQuery: "none",
+                    settings: {
+                        allowInsecure: false,
+                        fingerprint: "chrome",
+                        echConfigList: ""
+                    }
+                }
+            };
+        } else if (type.startsWith('ss_')) {
+            protocol = "shadowsocks";
+            const method = '2022-' + type.replace('ss_', '').replace(/_/g, '-');
+            let keyLength;
+            if (method.includes('aes-128')) keyLength = 16;
+            else keyLength = 32;
+            const password = randomBase64(keyLength);
+            const clients = method.includes('aes-') ? [{
+                password: randomBase64(keyLength),
+                email: email,
+                subId: subId,
+                limitIp: 0,
+                totalGB: 0,
+                expiryTime: 0,
+                enable: true,
+                tgId: "",
+                comment: "",
+                reset: 0
+            }] : [];
             settings = JSON.stringify({
                 method: method,
                 password: password,
@@ -1164,18 +1946,14 @@
         const payload = {
             up: 0, down: 0, total: 0, remark: fullName, enable: true, expiryTime: 0,
             trafficReset: "never", lastTrafficResetTime: 0, listen: "", port: port,
-            protocol: protocol, settings: settings,
-            streamSettings: JSON.stringify(stream),
-            sniffing: JSON.stringify(sniff)
+            protocol: protocol,
+            settings: typeof settings === 'string' ? JSON.parse(settings) : settings,
+            streamSettings: stream,
+            sniffing: sniff
         };
 
         try {
-            const res = await fetch(`${getBasePath()}/panel/api/inbounds/add`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
-            });
-            const data = await res.json();
+            const data = await createInboundWithClients(payload);
             if (data.success) {
                 toast(`节点创建成功! ${fullName}`, 'success');
                 return true;
@@ -1190,8 +1968,7 @@
 
     async function disableSubscription() {
         try {
-            const getRes = await fetch(`${getBasePath()}/panel/setting/all`, { method: 'POST' });
-            const getData = await getRes.json();
+            const getData = await getPanelSettingsRaw();
             if (!getData.success) throw new Error("获取当前设置失败");
             const settings = getData.obj;
             if (settings.subEnable === false) {
@@ -1199,19 +1976,10 @@
                 return;
             }
             settings.subEnable = false;
-            const updateRes = await fetch(`${getBasePath()}/panel/setting/update`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(settings)
-            });
-            const updateData = await updateRes.json();
+            const updateData = await updatePanelSettings(settings);
             if (updateData.success) {
                 toast('已成功关闭订阅访问 (subEnable: false),即将重启面板', 'success');
-                const restartRes = await fetch(`${getBasePath()}/panel/setting/restartPanel`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' }
-                });
-                const restartData = await restartRes.json();
+                const restartData = await restartPanel();
                 if (restartData.success) {
                     toast('面板重启成功', 'success');
                     setTimeout(() => location.reload(), 2500);
@@ -1226,17 +1994,16 @@
 
     async function addOutboundRules() {
         try {
-            const getRes = await fetch(`${getBasePath()}/panel/xray/`, { method: 'POST' });
-            const getData = await getRes.json();
+            const getData = await getXrayConfigResponse();
             if (!getData.success) throw new Error("获取配置失败");
 
-            let fullConfig;
+            let xraySetting;
             try {
-                fullConfig = JSON.parse(getData.obj);
+                xraySetting = parseXrayConfigResponse(getData);
             } catch (parseError) {
                 throw new Error("解析 Xray 配置失败");
             }
-            if (!fullConfig.xraySetting.outbounds) fullConfig.xraySetting.outbounds = [];
+            if (!xraySetting.outbounds) xraySetting.outbounds = [];
             const rulesToAdd = [
                 {
                     "protocol": "freedom",
@@ -1251,14 +2018,14 @@
             ];
             let addedCount = 0;
             rulesToAdd.forEach(rule => {
-                const exists = fullConfig.xraySetting.outbounds.some(o =>
+                const exists = xraySetting.outbounds.some(o =>
                     o.protocol === rule.protocol &&
                     o.settings &&
                     rule.settings &&
                     o.settings.domainStrategy === rule.settings.domainStrategy
                 );
                 if (!exists) {
-                    fullConfig.xraySetting.outbounds.push(rule);
+                    xraySetting.outbounds.push(rule);
                     addedCount++;
                 }
             });
@@ -1266,21 +2033,10 @@
                 toast('出站规则已存在，无需添加', 'success');
                 return;
             }
-            const formData = new URLSearchParams();
-            formData.append('xraySetting', JSON.stringify(fullConfig.xraySetting));
-
-            const updateRes = await fetch(`${getBasePath()}/panel/xray/update`, {
-                method: 'POST',
-                body: formData
-            });
-            const updateData = await updateRes.json();
+            const updateData = await updateXrayConfig(xraySetting);
             if (updateData.success) {
                 toast('出站规则添加成功，正在重启 Xray...', 'success');
-                const restartRes = await fetch(`${getBasePath()}/panel/api/server/restartXrayService`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' }
-                });
-                const restartData = await restartRes.json();
+                const restartData = await restartXrayService();
                 if (restartData.success) {
                     toast('Xray 重启成功', 'success');
                     setTimeout(() => location.reload(), 2500);
@@ -1297,12 +2053,11 @@
 
     async function checkOutboundRulesExist() {
         try {
-            const res = await fetch(`${getBasePath()}/panel/xray/`, { method: 'POST' });
-            const data = await res.json();
+            const data = await getXrayConfigResponse();
             if (!data.success) return false;
 
-            const config = JSON.parse(data.obj);
-            const outbounds = config.xraySetting?.outbounds || [];
+            const config = parseXrayConfigResponse(data);
+            const outbounds = config?.outbounds || [];
 
             const hasIPv4v6 = outbounds.some(o =>
                 o.protocol === "freedom" &&
@@ -1334,20 +2089,18 @@
         let ipv4v6Tag = '';
         let ipv6v4Tag = '';
         try {
-            const inboundsRes = await fetch(`${getBasePath()}/panel/api/inbounds/list`);
-            const inboundsData = await inboundsRes.json();
+            const inboundsData = await getInbounds();
             if (!inboundsData.success) throw new Error("获取入站列表失败");
             inbounds = inboundsData.obj.map(item => ({
                 tag: item.tag,
                 remark: item.remark || '未知节点'
             }));
 
-            const xrayRes = await fetch(`${getBasePath()}/panel/xray/`, { method: 'POST' });
-            const xrayData = await xrayRes.json();
+            const xrayData = await getXrayConfigResponse();
             if (!xrayData.success) throw new Error('获取Xray配置失败');
-            const obj = JSON.parse(xrayData.obj);
-            currentRules = obj.xraySetting.routing?.rules || [];
-            const outbounds = obj.xraySetting.outbounds || [];
+            const obj = parseXrayConfigResponse(xrayData);
+            currentRules = obj.routing?.rules || [];
+            const outbounds = obj.outbounds || [];
             const ipv4v6Outbound = outbounds.find(o => o.protocol === "freedom" && o.settings?.domainStrategy === "UseIPv4v6");
             const ipv6v4Outbound = outbounds.find(o => o.protocol === "freedom" && o.settings?.domainStrategy === "UseIPv6v4");
             if (!ipv4v6Outbound || !ipv6v4Outbound) {
@@ -1479,10 +2232,8 @@
             const selected = Array.from(list.querySelectorAll('.xp-checkbox.checked')).map(cb => cb.dataset.tag);
 
             try {
-                const res = await fetch(`${getBasePath()}/panel/xray/`, { method: 'POST' });
-                const data = await res.json();
-                const obj = JSON.parse(data.obj);
-                let cfg = obj.xraySetting;
+                const data = await getXrayConfigResponse();
+                let cfg = parseXrayConfigResponse(data);
                 if (!cfg.routing) cfg.routing = { rules: [], domainStrategy: "AsIs" };
 
                 cfg.routing.rules = cfg.routing.rules.filter(r => {
@@ -1498,15 +2249,11 @@
                     });
                 }
 
-                const formData = new URLSearchParams();
-                formData.append('xraySetting', JSON.stringify(cfg));
-                const updateRes = await fetch(`${getBasePath()}/panel/xray/update`, { method: 'POST', body: formData });
-                const updateData = await updateRes.json();
+                const updateData = await updateXrayConfig(cfg);
 
                 if (updateData.success) {
                     toast(selected.length === 0 ? '已清除该优先级路由规则' : '路由规则保存成功，正在重启 Xray...', 'success');
-                    const restartRes = await fetch(`${getBasePath()}/panel/api/server/restartXrayService`, { method: 'POST', headers: { 'Content-Type': 'application/json' } });
-                    const restartData = await restartRes.json();
+                    const restartData = await restartXrayService();
                     if (restartData.success) {
                         toast('Xray 重启成功', 'success');
                         setTimeout(() => { backdrop.remove(); location.reload(); }, 2000);
@@ -1524,15 +2271,21 @@
 
     async function openBatchDelete() {
         let nodes = [];
+        let clientRows = [];
         try {
-            const res = await fetch(`${getBasePath()}/panel/api/inbounds/list`);
-            const data = await res.json();
+            const data = await getInbounds({ full: true });
             if (!data.success) throw new Error("获取节点列表失败");
+            if (await hasClientsApi()) {
+                const clientsData = await getClientsList();
+                clientRows = Array.isArray(clientsData.obj) ? clientsData.obj : [];
+            }
             nodes = data.obj.map(item => ({
                 id: item.id,
-                remark: item.remark,
+                remark: getInboundDisplayName(item),
                 port: item.port,
-                protocol: item.protocol.toUpperCase()
+                protocol: item.protocol.toUpperCase(),
+                clientEmails: getInboundClientEmails(item, clientRows),
+                inbound: item
             }));
         } catch (e) {
             toast('获取节点失败: ' + e.message, 'error');
@@ -1626,8 +2379,9 @@
                 let successCount = 0;
                 for (const id of selected) {
                     try {
-                        const res = await fetch(`${getBasePath()}/panel/api/inbounds/del/${id}`, { method: 'POST' });
-                        const data = await res.json();
+                        const node = nodes.find(item => String(item.id) === String(id));
+                        if (!node) throw new Error('节点不存在');
+                        const data = await deleteInboundWithClients(node.inbound, clientRows);
                         if (data.success) successCount++;
                     } catch (e) {
                         toast(`删除节点 ${id} 失败: ${e.message}`, 'error');
@@ -1635,8 +2389,7 @@
                 }
                 toast(`成功删除 ${successCount} 个节点`, 'success');
                 if (successCount > 0) {
-                    const restartRes = await fetch(`${getBasePath()}/panel/api/server/restartXrayService`, { method: 'POST', headers: { 'Content-Type': 'application/json' } });
-                    const restartData = await restartRes.json();
+                    const restartData = await restartXrayService();
                     if (restartData.success) {
                         setTimeout(() => { backdrop.remove(); location.reload(); }, 2000);
                     }
@@ -1652,17 +2405,10 @@
         let stats= {};
         let protocolList;
         try {
-            const isXUI = window.location.pathname.includes('/xui/');
-            const apiUrl = isXUI
-                ? `${getBasePath()}/xui/inbound/list`
-                : `${getBasePath()}/panel/api/inbounds/list`;
-
-            const res = await fetch(apiUrl, {
-                method: isXUI ? 'POST' : 'GET'
-            });
-            const data = await res.json();
+            const data = await getInbounds({ full: true });
             const generator = new NodeGenerator({ address: location.hostname });
             results = generator.generateAllLinks(data, location.hostname);
+            results = await fillMissingClientLinks(results);
 
             stats = getInboundStats(data.obj);
             protocolList = Object.entries(stats.protocols)
@@ -1726,16 +2472,16 @@
             const linksHtml = item.links.map(link => `
                 <div class="node-link-wrapper">
                     <div class="node-link-scroller">
-                        <span>${link}</span>
+                        <span>${escapeHtml(link)}</span>
                     </div>
-                    <button class="node-copy-btn" title="Copy" data-link="${link}">${SVG_ICONS.copy}</button>
+                    <button class="node-copy-btn" title="Copy" data-link="${escapeHtml(link)}">${SVG_ICONS.copy}</button>
                 </div>
             `).join('');
             return `
                 <div class="node-result-item">
                     <div class="node-info-row">
-                        <span class="node-name">${item.remark}</span>
-                        <span class="node-protocol">${item.protocol}</span>
+                        <span class="node-name">${escapeHtml(item.remark)}</span>
+                        <span class="node-protocol">${escapeHtml(item.protocol)}</span>
                     </div>
                     ${linksHtml}
                 </div>
@@ -2022,6 +2768,13 @@
                         <div class="xp-protocol-actions">${renderCheckbox('vmess_ws_tls', !tlsDisabled, tlsDisabled)}<button class="xp-toggle-btn" id="toggle-vmess_ws_tls">${SVG_ICONS.toggle}</button></div>
                     </div>
                     <div class="xp-info-panel" id="info-vmess_ws_tls"><div class="xp-info-content"><div class="xp-info-title">配置详情</div><div class="xp-info-list"><div class="xp-info-item">传输: WS</div><div class="xp-info-item">安全: tls</div></div></div></div>
+                </div>
+                <div class="xp-protocol-item ${tlsDisabled ? '' : 'selected'}" data-protocol="hysteria2">
+                    <div class="xp-protocol-header">
+                        <div class="xp-protocol-main"><div class="xp-protocol-icon">${SVG_ICONS.ladder}</div><div class="xp-protocol-name">HYSTERIA2 (TLS)</div></div>
+                        <div class="xp-protocol-actions">${renderCheckbox('hysteria2', !tlsDisabled, tlsDisabled)}<button class="xp-toggle-btn" id="toggle-hysteria2">${SVG_ICONS.toggle}</button></div>
+                    </div>
+                    <div class="xp-info-panel" id="info-hysteria2"><div class="xp-info-content"><div class="xp-info-title">配置详情</div><div class="xp-info-list"><div class="xp-info-item">链接: hysteria2://</div><div class="xp-info-item">安全: tls</div><div class="xp-info-item">认证: auth password</div></div></div></div>
                 </div>
                 <div class="xp-protocol-item selected" data-protocol="ss_blake3_chacha20_poly1305">
                     <div class="xp-protocol-header">
