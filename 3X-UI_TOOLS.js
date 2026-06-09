@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         3X-UI多功能脚本
 // @namespace    http://tampermonkey.net/
-// @version      2.0
+// @version      2.0.1
 // @description  3X-UI 多功能工具：一键创建/查看/删除节点、关闭订阅、出站/路由配置，适配 2.x/3.x
 // @icon         https://avatars.githubusercontent.com/u/86963023
 // @author       Yannick Young
@@ -75,7 +75,7 @@
           case 'http':
             return this.genHttpLink(inbound, streamSettings);
           case 'mixed':
-            return [this.genSocksLink(inbound, streamSettings), this.genHttpLink(inbound, streamSettings)].filter(Boolean);
+            return this.genSocksLink(inbound, streamSettings);
           default:
             return '';
         }
@@ -2022,6 +2022,7 @@
 
         const isTls = type.endsWith('_tls') || type === 'hysteria2';
         let panelSettings;
+        let tlsServerName = '';
         if (isTls) {
             if (type !== 'hysteria2' && location.protocol !== 'https:') {
                 toast('TLS节点需要HTTPS访问面板', 'error');
@@ -2029,10 +2030,11 @@
             }
             try {
                 panelSettings = await getPanelSettings();
-                if (!panelSettings.webDomain || !panelSettings.webCertFile || !panelSettings.webKeyFile) {
+                if (!panelSettings.webCertFile || !panelSettings.webKeyFile) {
                     toast('缺少TLS配置信息', 'error');
                     return false;
                 }
+                tlsServerName = panelSettings.webDomain || location.hostname;
             } catch (e) {
                 toast(`${e.message}`, 'error');
                 return false;
@@ -2077,16 +2079,15 @@
             });
             stream = {
                 network: "xhttp", security: isTls ? "tls" : "none", externalProxy: [],
-                xhttpSettings: { path: `/${randomShortId()}`, host: isTls ? panelSettings.webDomain : "" }
+                xhttpSettings: { path: `/${randomShortId()}`, host: isTls ? tlsServerName : "" }
             };
             if (isTls) {
                 stream.tlsSettings = {
-                    serverName: panelSettings.webDomain,
+                    serverName: tlsServerName,
                     minVersion: "1.2",
                     maxVersion: "1.3",
                     cipherSuites: "",
                     rejectUnknownSni: false,
-                    verifyPeerCertInNames: ["dns.google", "cloudflare-dns.com"],
                     disableSystemRoot: false,
                     enableSessionResumption: false,
                     certificates: [{
@@ -2114,16 +2115,15 @@
             });
             stream = {
                 network: "ws", externalProxy: [], security: isTls ? "tls" : "none",
-                wsSettings: { acceptProxyProtocol: false, path: `/${randomShortId()}`, headers: {}, host: isTls ? panelSettings.webDomain : "" }
+                wsSettings: { acceptProxyProtocol: false, path: `/${randomShortId()}`, headers: {}, host: isTls ? tlsServerName : "" }
             };
             if (isTls) {
                 stream.tlsSettings = {
-                    serverName: panelSettings.webDomain,
+                    serverName: tlsServerName,
                     minVersion: "1.2",
                     maxVersion: "1.3",
                     cipherSuites: "",
                     rejectUnknownSni: false,
-                    verifyPeerCertInNames: ["dns.google", "cloudflare-dns.com"],
                     disableSystemRoot: false,
                     enableSessionResumption: false,
                     certificates: [{
@@ -2179,12 +2179,11 @@
                     }
                 },
                 tlsSettings: {
-                    serverName: panelSettings.webDomain,
+                    serverName: tlsServerName,
                     minVersion: "1.2",
                     maxVersion: "1.3",
                     cipherSuites: "",
                     rejectUnknownSni: false,
-                    verifyPeerCertInNames: [],
                     disableSystemRoot: false,
                     enableSessionResumption: false,
                     certificates: [{
@@ -3128,7 +3127,7 @@
         if (isHttps) {
             try {
                 const panelSettings = await getPanelSettings();
-                canUseTls = !!panelSettings.webDomain && !!panelSettings.webCertFile && !!panelSettings.webKeyFile;
+                canUseTls = !!panelSettings.webCertFile && !!panelSettings.webKeyFile;
             } catch (e) {}
         }
         const tlsDisabled = !canUseTls;
