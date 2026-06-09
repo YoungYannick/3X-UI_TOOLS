@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         3X-UI多功能脚本
 // @namespace    http://tampermonkey.net/
-// @version      1.9
+// @version      2.0
 // @description  3X-UI 多功能工具：一键创建/查看/删除节点、关闭订阅、出站/路由配置，适配 2.x/3.x
 // @icon         https://avatars.githubusercontent.com/u/86963023
 // @author       Yannick Young
@@ -858,7 +858,8 @@
         startPort: 30000,
         target: "www.apple.com:443",
         serverName: "www.apple.com",
-        randomPortMode: false
+        randomPortMode: false,
+        showNodesFloatButton: true
     };
 
     let CONFIG = loadConfig();
@@ -885,7 +886,8 @@
         { id: 'config-startPort', key: 'startPort', type: 'number', label: '起始查找端口 (startPort)' },
         { id: 'config-target', key: 'target', type: 'text', label: 'Reality 回落地址 (Target)' },
         { id: 'config-serverName', key: 'serverName', type: 'text', label: 'Reality 伪装域名 (ServerName / SNI)' },
-        { id: 'config-randomPortMode', key: 'randomPortMode', type: 'checkbox', label: '启用随机端口模式 (10000-60000)' }
+        { id: 'config-randomPortMode', key: 'randomPortMode', type: 'checkbox', label: '启用随机端口模式 (10000-60000)' },
+        { id: 'config-showNodesFloatButton', key: 'showNodesFloatButton', type: 'checkbox', label: '显示节点浮动按钮' }
     ];
 
     const SVG_ICONS = {
@@ -904,132 +906,358 @@
         copy: `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>`
     };
 
+    function isDarkMode() {
+        const stored = localStorage.getItem('dark-mode');
+        if (stored !== null) return stored === 'true';
+        if (document.body.classList.contains('light')) return false;
+        if (document.body.classList.contains('dark')) return true;
+        return true;
+    }
+
+    let lastThemeMode = null;
+    let themeObserverStarted = false;
+
+    function applyThemeMode() {
+        const dark = isDarkMode();
+        if (lastThemeMode === dark && document.documentElement.classList.contains('xui-tools-dark') === dark) return;
+        lastThemeMode = dark;
+        document.documentElement.classList.toggle('xui-tools-dark', dark);
+    }
+
+    function watchThemeMode() {
+        if (themeObserverStarted) return;
+        themeObserverStarted = true;
+
+        window.addEventListener('storage', (event) => {
+            if (event.key === 'dark-mode') applyThemeMode();
+        });
+
+        if (!document.body) return;
+        const observer = new MutationObserver((mutations) => {
+            if (mutations.some(item => item.type === 'attributes' && item.attributeName === 'class')) {
+                applyThemeMode();
+            }
+        });
+        observer.observe(document.body, { attributes: true, attributeFilter: ['class'] });
+    }
+
     function injectStyles() {
+        applyThemeMode();
         if (document.getElementById('xui-css')) return;
         const css = `
-            #xui-float-btn{position:fixed;top:20px;right:20px;width:50px;height:50px;background:#1f2937;border-radius:50%;color:white;display:flex;align-items:center;justify-content:center;cursor:move;box-shadow:0 4px 15px rgba(0,0,0,0.3);z-index:9998;transition:transform .2s,background .2s;user-select:none}
-            #xui-float-btn:hover{background:#000;transform:scale(1.05)}
-            #xui-float-btn:active{transform:scale(0.95)}
-            #xui-backdrop,#xui-route-backdrop,#xui-delete-backdrop,#xui-shownodes-backdrop{position:fixed;inset:0;background:rgba(0,0,0,0.7);backdrop-filter:blur(4px);z-index:9999;display:none;justify-content:center;align-items:center;animation:fadeIn .4s ease-in-out}
+            :root{--xui-bg:#fff;--xui-bg-muted:#f9fafb;--xui-bg-soft:#f3f4f6;--xui-text:#111827;--xui-muted:#4b5563;--xui-subtle:#6b7280;--xui-border:#e5e7eb;--xui-border-strong:#d1d5db;--xui-button:#111827;--xui-button-hover:#000;--xui-shadow:0 24px 48px rgba(0,0,0,.22);--xui-code-bg:#f6f8fa;--xui-code-text:#24292f}
+            :root.xui-tools-dark{--xui-bg:#050505;--xui-bg-muted:#0d0d0d;--xui-bg-soft:#171717;--xui-text:#f5f5f5;--xui-muted:#d4d4d4;--xui-subtle:#a3a3a3;--xui-border:#262626;--xui-border-strong:#404040;--xui-button:#f5f5f5;--xui-button-hover:#fff;--xui-shadow:0 24px 48px rgba(0,0,0,.55);--xui-code-bg:#0a0a0a;--xui-code-text:#f5f5f5}
+            #xui-float-btn,#xui-show-nodes-float-btn{position:fixed;right:20px;width:50px;height:50px;background:var(--xui-button);border:1px solid var(--xui-button);border-radius:50%;color:var(--xui-bg);display:flex;align-items:center;justify-content:center;cursor:move;box-shadow:0 4px 15px rgba(0,0,0,0.24);z-index:9998;transition:background .2s,color .2s,border-color .2s;user-select:none}
+            #xui-float-btn{top:20px}
+            #xui-show-nodes-float-btn{top:82px}
+            #xui-float-btn:hover,#xui-show-nodes-float-btn:hover{background:var(--xui-button-hover)}
+            #xui-float-btn:active,#xui-show-nodes-float-btn:active{filter:brightness(.92)}
+            #xui-backdrop,#xui-route-backdrop,#xui-delete-backdrop,#xui-shownodes-backdrop{position:fixed;inset:0;background:transparent;z-index:9999;display:none;pointer-events:none}
             @keyframes fadeIn{from{opacity:0}to{opacity:1}}
-            #xui-panel,#xui-route-panel,#xui-delete-panel,#xui-shownodes-panel{background:#fff;width:900px;max-height:90vh;overflow-y:auto;border-radius:12px;box-shadow:0 25px 50px rgba(0,0,0,0.4);animation:slideUp .4s cubic-bezier(.34,1.56,.64,1);border:1px solid #e5e7eb}
-            #xui-confirm-backdrop{position:fixed;inset:0;background:rgba(0,0,0,0.7);backdrop-filter:blur(4px);z-index:10001;display:none;justify-content:center;align-items:center;animation:fadeIn .4s ease-in-out}
-            .xp-confirm-panel{background:#fff;width:400px;padding:20px;border-radius:12px;box-shadow:0 25px 50px rgba(0,0,0,0.4);animation:slideUp .4s cubic-bezier(.34,1.56,.64,1);border:1px solid #e5e7eb;text-align:center}
-            .xp-confirm-title{font-size:18px;font-weight:700;color:#1f2937;margin-bottom:12px}
-            .xp-confirm-content{font-size:14px;color:#4b5563;margin-bottom:20px}
+            #xui-panel,#xui-route-panel,#xui-delete-panel,#xui-shownodes-panel{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:var(--xui-bg);color:var(--xui-text);width:min(900px,calc(100vw - 32px));max-height:calc(100vh - 48px);overflow:hidden;border-radius:8px;box-shadow:var(--xui-shadow);animation:panelIn .18s cubic-bezier(.2,.8,.2,1);border:1px solid var(--xui-border);pointer-events:auto;display:flex;flex-direction:column;will-change:transform,opacity}
+            #xui-panel{width:min(1180px,calc(100vw - 32px))}
+            #xui-delete-panel{width:min(860px,calc(100vw - 32px));min-height:240px}
+            #xui-delete-panel.batch-users-panel{width:min(900px,calc(100vw - 32px));min-height:300px}
+            #xui-shownodes-panel{width:min(1040px,calc(100vw - 32px))}
+            #xui-confirm-backdrop{position:fixed;inset:0;background:transparent;z-index:10001;display:none;pointer-events:none}
+            .xp-confirm-panel{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:var(--xui-bg);color:var(--xui-text);width:min(400px,calc(100vw - 32px));padding:20px;border-radius:8px;box-shadow:var(--xui-shadow);animation:panelIn .18s cubic-bezier(.2,.8,.2,1);border:1px solid var(--xui-border);text-align:center;pointer-events:auto;will-change:transform,opacity}
+            .xp-confirm-title{font-size:18px;font-weight:700;color:var(--xui-text);margin-bottom:12px}
+            .xp-confirm-content{font-size:14px;color:var(--xui-muted);margin-bottom:20px}
             .xp-confirm-btns{display:flex;justify-content:center;gap:12px}
             .xp-confirm-yes{background:#ef4444;color:white;padding:10px 20px;border:none;border-radius:8px;font-size:14px;cursor:pointer;transition:all .2s}
             .xp-confirm-yes:hover{background:#dc2626}
-            .xp-confirm-no{background:#6b7280;color:white;padding:10px 20px;border:none;border-radius:8px;font-size:14px;cursor:pointer;transition:all .2s}
-            .xp-confirm-no:hover{background:#4b5563}
-            @keyframes slideUp{from{transform:translateY(30px) scale(0.95);opacity:0}to{transform:translateY(0) scale(1);opacity:1}}
-            .xp-header{background:#f9fafb;padding:20px 24px;color:#1f2937;position:relative;border-bottom:1px solid #e5e7eb}
+            .xp-confirm-no{background:var(--xui-bg-soft);color:var(--xui-text);padding:10px 20px;border:1px solid var(--xui-border);border-radius:8px;font-size:14px;cursor:pointer;transition:all .2s}
+            .xp-confirm-no:hover{background:var(--xui-border);color:var(--xui-text)}
+            .xui-layer-closing #xui-panel,.xui-layer-closing #xui-route-panel,.xui-layer-closing #xui-delete-panel,.xui-layer-closing #xui-shownodes-panel,.xui-layer-closing .xp-confirm-panel{animation:panelOut .14s ease-in forwards;pointer-events:none}
+            .xui-layer-closing .xui-panel-moved{animation:panelFadeOut .14s ease-in forwards!important}
+            @keyframes panelIn{from{opacity:0;transform:translate(-50%,-48%) scale(.985)}to{opacity:1;transform:translate(-50%,-50%) scale(1)}}
+            @keyframes panelOut{from{opacity:1;transform:translate(-50%,-50%) scale(1)}to{opacity:0;transform:translate(-50%,-48%) scale(.985)}}
+            @keyframes panelFadeOut{from{opacity:1}to{opacity:0}}
+            @media (prefers-reduced-motion: reduce){#xui-panel,#xui-route-panel,#xui-delete-panel,#xui-shownodes-panel,.xp-confirm-panel,.xui-layer-closing #xui-panel,.xui-layer-closing #xui-route-panel,.xui-layer-closing #xui-delete-panel,.xui-layer-closing #xui-shownodes-panel,.xui-layer-closing .xp-confirm-panel{animation:none}}
+            .xp-header{background:var(--xui-bg-muted);padding:18px 64px 18px 24px;color:var(--xui-text);position:relative;border-bottom:1px solid var(--xui-border);cursor:move;user-select:none}
             .xp-title{font-size:18px;font-weight:700}
-            .xp-subtitle{font-size:13px;color:#6b7280;margin-top:4px}
-            .xp-close{position:absolute;top:16px;right:16px;width:32px;height:32px;border-radius:6px;background:none;display:flex;align-items:center;justify-content:center;cursor:pointer;color:#6b7280;transition:all .2s}
-            .xp-close:hover{background:#e5e7eb;color:#1f2937}
-            .xp-body{padding:24px}
-            .xp-protocol-item{background:white;border-radius:8px;margin-bottom:12px;border:1px solid #d1d5db;transition:border-color .2s}
-            .xp-protocol-item.selected{border-color:#1f2937;background:#f9fafb}
+            .xp-close{position:absolute;top:50%;right:16px;transform:translateY(-50%);width:32px;height:32px;border-radius:6px;background:none;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--xui-subtle);transition:all .2s}
+            .xp-close:hover{background:var(--xui-bg-soft);color:var(--xui-text)}
+            .xp-body{padding:24px;overflow-y:auto;min-height:0;flex:1}
+            #xui-panel,#xui-route-panel,#xui-delete-panel,#xui-shownodes-panel,.xp-body,#route-inbounds-list,#delete-nodes-list,.node-link-scroller,.xp-footer-actions{scrollbar-width:thin;scrollbar-color:var(--xui-border-strong) transparent}
+            #xui-panel::-webkit-scrollbar,#xui-route-panel::-webkit-scrollbar,#xui-delete-panel::-webkit-scrollbar,#xui-shownodes-panel::-webkit-scrollbar,.xp-body::-webkit-scrollbar,#route-inbounds-list::-webkit-scrollbar,#delete-nodes-list::-webkit-scrollbar,.node-link-scroller::-webkit-scrollbar,.xp-footer-actions::-webkit-scrollbar{width:8px;height:8px}
+            #xui-panel::-webkit-scrollbar-track,#xui-route-panel::-webkit-scrollbar-track,#xui-delete-panel::-webkit-scrollbar-track,#xui-shownodes-panel::-webkit-scrollbar-track,.xp-body::-webkit-scrollbar-track,#route-inbounds-list::-webkit-scrollbar-track,#delete-nodes-list::-webkit-scrollbar-track,.node-link-scroller::-webkit-scrollbar-track,.xp-footer-actions::-webkit-scrollbar-track{background:transparent}
+            #xui-panel::-webkit-scrollbar-thumb,#xui-route-panel::-webkit-scrollbar-thumb,#xui-delete-panel::-webkit-scrollbar-thumb,#xui-shownodes-panel::-webkit-scrollbar-thumb,.xp-body::-webkit-scrollbar-thumb,#route-inbounds-list::-webkit-scrollbar-thumb,#delete-nodes-list::-webkit-scrollbar-thumb,.node-link-scroller::-webkit-scrollbar-thumb,.xp-footer-actions::-webkit-scrollbar-thumb{background:var(--xui-border-strong);border:2px solid transparent;border-radius:999px;background-clip:content-box}
+            #xui-panel::-webkit-scrollbar-thumb:hover,#xui-route-panel::-webkit-scrollbar-thumb:hover,#xui-delete-panel::-webkit-scrollbar-thumb:hover,#xui-shownodes-panel::-webkit-scrollbar-thumb:hover,.xp-body::-webkit-scrollbar-thumb:hover,#route-inbounds-list::-webkit-scrollbar-thumb:hover,#delete-nodes-list::-webkit-scrollbar-thumb:hover,.node-link-scroller::-webkit-scrollbar-thumb:hover,.xp-footer-actions::-webkit-scrollbar-thumb:hover{background:var(--xui-subtle);border:2px solid transparent;background-clip:content-box}
+            #xp-protocols-view{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px;align-items:start}
+            .xp-protocol-item{background:var(--xui-bg);border-radius:8px;margin-bottom:0;border:1px solid transparent;transition:border-color .2s,background .2s,opacity .2s}
+            .xp-protocol-item.selected{border-color:var(--xui-text);background:var(--xui-bg-muted)}
+            .xp-protocol-item.disabled{border-color:var(--xui-border-strong);background:var(--xui-bg);opacity:.72}
+            .xp-protocol-item.disabled .xp-protocol-main{cursor:not-allowed}
             .xp-protocol-header{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;transition:background .2s}
             .xp-protocol-main{display:flex;align-items:center;flex:1;gap:12px;cursor:pointer}
-            .xp-protocol-icon{width:36px;height:36px;display:flex;align-items:center;justify-content:center;color:#1f2937;border-radius:6px;background:#e5e7eb}
-            .xp-protocol-name{font-weight:600;font-size:14px;color:#1f2937}
+            .xp-protocol-icon{width:36px;height:36px;display:flex;align-items:center;justify-content:center;color:var(--xui-text);border-radius:6px;background:var(--xui-bg-soft)}
+            .xp-protocol-name{font-weight:600;font-size:14px;color:var(--xui-text)}
             .xp-protocol-actions{display:flex;align-items:center;gap:8px}
-            .xp-toggle-btn{width:28px;height:28px;border-radius:6px;background:#f3f4f6;border:1px solid #e5e7eb;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .2s;color:#6b7280}
-            .xp-toggle-btn:hover{background:#e5e7eb;color:#1f2937}
+            .xp-toggle-btn{width:28px;height:28px;border-radius:6px;background:var(--xui-bg-soft);border:1px solid var(--xui-border);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .2s;color:var(--xui-subtle)}
+            .xp-toggle-btn:hover{background:var(--xui-border);color:var(--xui-text)}
             .xp-toggle-btn.active{transform:rotate(180deg)}
             .xp-checkbox-wrapper{height:18px}
-            .xp-checkbox{width:18px;height:18px;border:2px solid #6b7280;border-radius:4px;cursor:pointer;transition:all .2s;display:flex;align-items:center;justify-content:center;color:white;box-sizing:border-box}
-            .xp-checkbox.checked{background:#1f2937;border-color:#1f2937}
-            .xp-checkbox.checked svg{stroke:white}
-            .xp-checkbox.disabled{opacity:0.4;cursor:not-allowed;border-color:#9ca3af}
-            .xp-checkbox.disabled.checked{background:#6b7280;border-color:#6b7280}
+            .xp-checkbox{width:18px;height:18px;border:2px solid var(--xui-subtle);border-radius:4px;cursor:pointer;transition:all .2s;display:flex;align-items:center;justify-content:center;color:var(--xui-bg);box-sizing:border-box}
+            .xp-checkbox.checked{background:var(--xui-text);border-color:var(--xui-text)}
+            .xp-checkbox.checked svg{stroke:var(--xui-bg)}
+            .xp-checkbox.disabled{opacity:0.4;cursor:not-allowed;border-color:var(--xui-subtle)}
+            .xp-checkbox.disabled.checked{background:var(--xui-subtle);border-color:var(--xui-subtle)}
             .xp-info-panel{max-height:0;overflow:hidden;transition:max-height .3s ease-in-out}
             .xp-info-panel.show{max-height:600px}
-            .xp-info-content{padding:8px 16px 16px 16px;border-top:1px solid #f3f4f6}
-            .xp-info-title{font-size:12px;font-weight:600;color:#6b7280;margin:12px 0 8px 0;text-transform:uppercase;letter-spacing:.5px}
-            .xp-info-list{display:grid;gap:4px;font-size:13px;color:#4b5563}
+            .xp-info-content{padding:8px 16px 16px 16px;border-top:1px solid var(--xui-border)}
+            .xp-info-title{font-size:12px;font-weight:600;color:var(--xui-subtle);margin:12px 0 8px 0;text-transform:uppercase;letter-spacing:.5px}
+            .xp-info-list{display:grid;gap:4px;font-size:13px;color:var(--xui-muted)}
             .xp-info-item{display:flex;align-items:center;gap:6px;padding:4px 0}
-            .xp-info-item::before{content:"—";color:#9ca3af;font-weight:400}
-            .xp-footer{padding:16px 24px;border-top:1px solid #e5e7eb;display:flex;justify-content:space-between;align-items:center;background:#f9fafb}
-            .xp-create-btn-main{background:#1f2937;color:white;border:none;padding:10px 20px;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;transition:all .3s;box-shadow:0 4px 10px rgba(31,41,55,.3)}
-            .xp-create-btn-main:hover{background:#000;transform:translateY(-1px);box-shadow:0 6px 15px rgba(31,41,55,.4)}
-            .xp-create-btn-main:active{transform:translateY(0);background:#374151}
+            .xp-info-item::before{content:"-";color:var(--xui-subtle);font-weight:400}
+            .xp-footer{padding:16px 24px;border-top:1px solid var(--xui-border);display:flex;justify-content:space-between;align-items:center;gap:16px;background:var(--xui-bg-muted);flex:0 0 auto}
+            .xp-footer-actions{display:flex;gap:8px;align-items:center;justify-content:flex-end;flex-wrap:nowrap;min-width:0;overflow-x:auto}
+            .xp-create-btn-main{background:var(--xui-button);color:var(--xui-bg);border:none;padding:10px 20px;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;transition:all .2s;box-shadow:none;white-space:nowrap}
+            .xp-create-btn-main:hover{background:var(--xui-button-hover)}
+            .xp-create-btn-main:active{filter:brightness(.9)}
             .xp-create-btn-main:disabled{opacity:.7;cursor:not-allowed}
             .xp-toast{position:fixed;top:24px;right:24px;z-index:10000;padding:12px 20px;border-radius:8px;color:white;font-weight:600;font-size:13px;box-shadow:0 8px 20px rgba(0,0,0,.3);animation:slideInRight .4s cubic-bezier(.34,1.56,.64,1);display:flex;align-items:center;gap:8px}
             .xp-toast svg{width:18px;height:18px;stroke:white}
             @keyframes slideInRight{from{transform:translateX(400px);opacity:0}to{transform:translateX(0);opacity:1}}
             .xp-toast.success{background:#10b981}
             .xp-toast.error{background:#ef4444}
-            .xp-select-all{display:flex;align-items:center;font-size:13px;color:#4b5563;cursor:pointer}
-            .xp-footer-link{color:#6b7280;font-size:13px;cursor:pointer;transition:color .2s;font-weight:500;display:flex;align-items:center;gap:4px;text-decoration:none}
-            .xp-footer-link:hover{color:#1f2937}
+            .xp-select-all{display:flex;align-items:center;font-size:13px;color:var(--xui-muted);cursor:pointer}
+            .xp-footer-link{color:var(--xui-subtle);font-size:13px;cursor:pointer;transition:color .2s;font-weight:500;display:flex;align-items:center;gap:4px;text-decoration:none}
+            .xp-footer-link:hover{color:var(--xui-text)}
             .xp-config-group{margin-bottom:20px}
-            .xp-config-label{display:block;font-size:14px;font-weight:600;color:#1f2937;margin-bottom:6px}
-            .xp-config-input{width:100%;padding:10px 12px;border:1px solid #d1d5db;border-radius:6px;font-size:14px;box-sizing:border-box;transition:border-color .2s}
-            .xp-config-input:focus{border-color:#1f2937;outline:none}
-            .xp-config-checkbox-group{display:flex;align-items:center;gap:10px;font-size:14px;color:#1f2937}
-            .xp-config-title-small{font-size:16px;font-weight:700;color:#1f2937;margin-bottom:16px;border-bottom:1px solid #e5e7eb;padding-bottom:8px}
-            .xp-save-config-btn{background:#1f2937;color:white;border:none;padding:10px 20px;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;transition:all .3s;box-shadow:0 4px 10px rgba(31,41,55,.3)}
-            .xp-save-config-btn:hover{background:#000;transform:translateY(-1px);box-shadow:0 6px 15px rgba(31,41,55,.4)}
-            .xp-danger-btn{color:#ef4444;font-size:13px;cursor:pointer;transition:color .2s;font-weight:500;display:flex;align-items:center;gap:4px;background:none;border:1px solid transparent;padding:4px 8px;border-radius:6px}
+            .xp-config-label{display:block;font-size:14px;font-weight:600;color:var(--xui-text);margin-bottom:6px}
+            .xp-config-input{width:100%;padding:10px 12px;border:1px solid var(--xui-border-strong);border-radius:6px;font-size:14px;box-sizing:border-box;transition:border-color .2s;background:var(--xui-bg);color:var(--xui-text)}
+            .xp-config-input:focus{border-color:var(--xui-text);outline:none}
+            #xui-panel select,#xui-route-panel select,#xui-delete-panel select,#xui-shownodes-panel select{appearance:none;-webkit-appearance:none;background-color:var(--xui-bg);color:var(--xui-text);border:1px solid var(--xui-border-strong);border-radius:6px;padding:0 36px 0 12px;font-size:14px;line-height:36px;height:36px;box-sizing:border-box;cursor:pointer;transition:border-color .2s,background .2s,box-shadow .2s;background-image:linear-gradient(45deg,transparent 50%,var(--xui-subtle) 50%),linear-gradient(135deg,var(--xui-subtle) 50%,transparent 50%);background-position:calc(100% - 18px) 15px,calc(100% - 12px) 15px;background-size:6px 6px,6px 6px;background-repeat:no-repeat}
+            #xui-panel select:hover,#xui-route-panel select:hover,#xui-delete-panel select:hover,#xui-shownodes-panel select:hover{border-color:var(--xui-text);background-color:var(--xui-bg-muted)}
+            #xui-panel select:focus,#xui-route-panel select:focus,#xui-delete-panel select:focus,#xui-shownodes-panel select:focus{border-color:var(--xui-text);box-shadow:0 0 0 2px color-mix(in srgb,var(--xui-text) 16%,transparent);outline:none}
+            #xui-panel select:disabled,#xui-route-panel select:disabled,#xui-delete-panel select:disabled,#xui-shownodes-panel select:disabled{opacity:.55;cursor:not-allowed}
+            #xui-panel select option,#xui-route-panel select option,#xui-delete-panel select option,#xui-shownodes-panel select option{background:var(--xui-bg);color:var(--xui-text)}
+            .xp-config-checkbox-group{display:flex;align-items:center;gap:10px;font-size:14px;color:var(--xui-text)}
+            .xp-config-title-small{font-size:16px;font-weight:700;color:var(--xui-text);margin-bottom:16px;border-bottom:1px solid var(--xui-border);padding-bottom:8px}
+            .xp-save-config-btn{background:var(--xui-button);color:var(--xui-bg);border:none;padding:10px 20px;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;transition:all .2s;box-shadow:none}
+            .xp-save-config-btn:hover{background:var(--xui-button-hover)}
+            .xp-danger-btn{color:#ef4444;font-size:13px;cursor:pointer;transition:color .2s;font-weight:500;display:flex;align-items:center;gap:4px;background:none;border:1px solid transparent;padding:4px 8px;border-radius:6px;white-space:nowrap}
             .xp-danger-btn:hover{background:#fef2f2;color:#dc2626}
-            .xp-action-btn{color:#3b82f6;font-size:13px;cursor:pointer;transition:color .2s;font-weight:500;display:flex;align-items:center;gap:4px;background:none;border:1px solid transparent;padding:4px 8px;border-radius:6px}
-            .xp-action-btn:hover{background:#eff6ff;color:#2563eb}
-            .route-item{padding:10px 12px;border-bottom:1px solid #eee;display:flex;align-items:center;gap:12px;position:relative}
+            .xp-action-btn{color:var(--xui-text);font-size:13px;cursor:pointer;transition:all .2s;font-weight:500;display:flex;align-items:center;gap:4px;background:none;border:1px solid transparent;padding:4px 8px;border-radius:6px;white-space:nowrap}
+            .xp-action-btn:hover{background:var(--xui-bg-soft);color:var(--xui-text)}
+            .route-item{padding:10px 12px;border-bottom:1px solid var(--xui-border);display:flex;align-items:center;gap:12px;position:relative;color:var(--xui-text)}
             .route-item:last-child{border-bottom:none}
-            .route-tag{background:#e5e7eb;color:#1f2937;padding:3px 9px;border-radius:6px;font-size:12px;font-family:SF Mono,Menlo,Monaco,Consolas,monospace;font-weight:600;letter-spacing:0.5px}
-            .route-hint{font-size:11px;color:#9ca3af;position:absolute;right:12px;top:50%;transform:translateY(-50%)}
-            .route-remark{margin-left:auto;margin-right:280px;color:#6b7280;font-size:12px}
-            .node-result-item{margin-bottom:20px;border:1px solid #e5e7eb;border-radius:8px;padding:16px}
+            .route-tag{background:var(--xui-bg-soft);color:var(--xui-text);padding:3px 9px;border-radius:6px;font-size:12px;font-family:SF Mono,Menlo,Monaco,Consolas,monospace;font-weight:600;letter-spacing:0.5px}
+            .route-hint{font-size:11px;color:var(--xui-subtle);position:absolute;right:12px;top:50%;transform:translateY(-50%)}
+            .route-remark{margin-left:auto;margin-right:280px;color:var(--xui-subtle);font-size:12px}
+            .node-result-item{margin-bottom:20px;border:1px solid var(--xui-border);border-radius:8px;padding:16px}
             .node-info-row{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
-            .node-name{font-weight:700;color:#1f2937}
-            .node-protocol{background:#e5e7eb;color:#4b5563;padding:2px 8px;border-radius:4px;font-size:12px;font-weight:600;text-transform:uppercase}
+            .node-name{font-weight:700;color:var(--xui-text)}
+            .node-protocol{background:var(--xui-bg-soft);color:var(--xui-muted);padding:2px 8px;border-radius:4px;font-size:12px;font-weight:600;text-transform:uppercase}
             .node-link-wrapper{position:relative;margin-top:8px}
-            .node-link-scroller{background:#f6f8fa;border-radius:6px;padding:12px;font-family:SF Mono,Menlo,Monaco,Consolas,monospace;font-size:12px;color:#24292f;overflow-x:auto;white-space:nowrap}
-            .node-copy-btn{position:absolute;top:4px;right:4px;padding:4px;background:transparent;border:1px solid rgba(27,31,36,0.15);border-radius:6px;cursor:pointer;display:flex;align-items:center;justify-content:center;background-color:#f6f8fa;transition:all 0.2s;color:#57606a;z-index:1}
-            .node-copy-btn:hover{background-color:#f3f4f6;border-color:rgba(27,31,36,0.15);color:#24292f}
+            .node-link-scroller{background:var(--xui-code-bg);border-radius:6px;padding:12px;font-family:SF Mono,Menlo,Monaco,Consolas,monospace;font-size:12px;color:var(--xui-code-text);overflow-x:auto;white-space:nowrap}
+            .node-copy-btn{position:absolute;top:4px;right:4px;padding:4px;background:transparent;border:1px solid var(--xui-border-strong);border-radius:6px;cursor:pointer;display:flex;align-items:center;justify-content:center;background-color:var(--xui-code-bg);transition:all 0.2s;color:var(--xui-muted);z-index:1}
+            .node-copy-btn:hover{background-color:var(--xui-bg-soft);border-color:var(--xui-border-strong);color:var(--xui-text)}
             .node-copy-btn svg{width:14px;height:14px}
-            .xp-stats-card{background:#f9fafb;border-radius:8px;padding:16px;margin-bottom:20px;border:1px solid #e5e7eb}
-            .xp-stat-item{font-size:13px;color:#4b5563;margin-bottom:8px;display:flex;align-items:center;gap:4px}
-            .xp-stat-item b{font-weight:700;color:#1f2937}
+            .xp-stats-card{background:var(--xui-bg-muted);border-radius:8px;padding:16px;margin-bottom:20px;border:1px solid var(--xui-border)}
+            .xp-stat-item{font-size:13px;color:var(--xui-muted);margin-bottom:8px;display:flex;align-items:center;gap:4px}
+            .xp-stat-item b{font-weight:700;color:var(--xui-text)}
             .xp-stat-item.enabled b{color:#10b981}
             .xp-stat-item.disabled b{color:#ef4444}
             .xp-stat-item.expired b{color:#f59e0b}
             .xp-stats-row{display:flex;align-items:center;flex-wrap:wrap;gap:24px}
-            .xp-protocols-section{margin-top:12px;padding-top:12px;border-top:1px solid #e5e7eb}
+            .xp-protocols-section{margin-top:12px;padding-top:12px;border-top:1px solid var(--xui-border)}
             .xp-protocol-list{display:flex;align-items:center;flex-wrap:wrap;gap:12px}
-            .xp-protocol-list .xp-protocol-item{min-width:auto;border:1px solid #d1d5db;border-radius:16px;padding:2px 10px;font-size:13px;color:#4b5563;background:white;margin:0}
-            .xp-protocol-list .xp-protocol-item .protocol-count{font-weight:700;color:#1f2937}
-            .xp-protocol-list .protocol-name{font-weight:400;color:#374151}
+            .xp-protocol-list .xp-protocol-item{min-width:auto;border:1px solid var(--xui-border-strong);border-radius:16px;padding:2px 10px;font-size:13px;color:var(--xui-muted);background:var(--xui-bg);margin:0}
+            .xp-protocol-list .xp-protocol-item .protocol-count{font-weight:700;color:var(--xui-text)}
+            .xp-protocol-list .protocol-name{font-weight:400;color:var(--xui-muted)}
             .xp-config-checkbox-group input[type="checkbox"]{width:16px;height:16px}
             .xp-config-checkbox-group label.xp-config-label{margin:0}
             #shownodes-copy-all{width:auto;display:inline-flex;align-items:center;gap:6px}
             #xui-shownodes-panel .xp-body{padding-bottom:24px}
-            .xp-header-content { display: flex; justify-content: space-between; align-items: center; }
+            .xp-header-content { display: flex; justify-content: space-between; align-items: center; gap:16px; padding-right:48px; }
             .xp-header .xp-create-btn-main { padding: 8px 14px; font-size: 13px; }
-            #route-inbounds-list{max-height:420px;overflow-y:auto;border:1px solid #eee;border-radius:8px}
+            #route-inbounds-list{max-height:420px;overflow-y:auto;border:1px solid var(--xui-border);border-radius:8px}
             .route-inbounds-header{margin-bottom:12px;display:flex;align-items:center;justify-content:space-between}
-            #delete-nodes-list{max-height:420px;overflow-y:auto;border:1px solid #eee;border-radius:8px}
+            #delete-nodes-list{max-height:420px;overflow-y:auto;border:1px solid var(--xui-border);border-radius:8px}
             .delete-nodes-header{margin-bottom:12px;display:flex;align-items:center;justify-content:space-between}
             #delete-apply-btn{background:#ef4444;color:white;padding:10px 20px;border-radius:8px}
-            .batch-user-form{display:flex;align-items:center;gap:10px;margin-bottom:12px;padding:12px;border:1px solid #e5e7eb;border-radius:8px;background:#f9fafb}
-            .batch-user-form select,.batch-user-form input{height:36px;border:1px solid #d1d5db;border-radius:6px;padding:0 10px;background:white;color:#1f2937}
+            .batch-user-form{display:flex;align-items:center;gap:10px;margin-bottom:12px;padding:12px;border:1px solid var(--xui-border);border-radius:8px;background:var(--xui-bg-muted)}
+            .batch-user-form select,.batch-user-form input{height:36px;border:1px solid var(--xui-border-strong);border-radius:6px;padding:0 10px;background-color:var(--xui-bg);color:var(--xui-text)}
+            .batch-user-form select{padding-right:36px}
             .batch-user-form select{min-width:260px;flex:1}
             .batch-user-form input{width:110px}
             .batch-tabs{display:flex;gap:8px;margin-bottom:12px}
-            .batch-tab{padding:8px 12px;border:1px solid #d1d5db;border-radius:6px;background:white;color:#374151;cursor:pointer}
-            .batch-tab.active{background:#1f2937;color:white;border-color:#1f2937}
-            .client-email{font-family:SF Mono,Menlo,Monaco,Consolas,monospace;font-size:12px;color:#374151}
-            #xui-delete-panel .xp-body, #xui-route-panel .xp-body {padding-bottom:0}
+            .batch-tab{padding:8px 12px;border:1px solid var(--xui-border-strong);border-radius:6px;background:var(--xui-bg);color:var(--xui-muted);cursor:pointer}
+            .batch-tab.active{background:var(--xui-text);color:var(--xui-bg);border-color:var(--xui-text)}
+            .client-email{font-family:SF Mono,Menlo,Monaco,Consolas,monospace;font-size:12px;color:var(--xui-muted)}
+            #xui-delete-panel .xp-body, #xui-route-panel .xp-body {padding-bottom:24px}
+            .batch-user-note{font-size:12px;color:var(--xui-subtle);line-height:1.6}
             .radio-group{margin-bottom:16px;display:flex;gap:16px;align-items:center}
-            .route-remark-port{color:#6b7280;font-size:12px;margin-left:auto;margin-right:120px}
+            .route-remark-port{color:var(--xui-subtle);font-size:12px;margin-left:auto;margin-right:120px}
+            @media (max-width: 720px){#xui-panel,#xui-route-panel,#xui-delete-panel,#xui-shownodes-panel{top:16px;left:16px;right:16px;transform:none;width:auto;max-height:calc(100vh - 32px)}#xp-protocols-view{grid-template-columns:1fr}.xp-footer{align-items:flex-start;gap:12px;flex-direction:column}.xp-footer-actions{justify-content:flex-start;flex-wrap:wrap}.batch-user-form{align-items:stretch;flex-direction:column}.batch-user-form select,.batch-user-form input{width:100%;min-width:0}.route-remark,.route-remark-port{margin-right:0}.route-item{align-items:flex-start;flex-direction:column}.route-hint{position:static;transform:none}}
         `;
         const style = document.createElement('style');
         style.id = 'xui-css';
         document.head.appendChild(style);
         style.textContent = css;
+    }
+
+    let xuiLayerZ = 9999;
+
+    function bringLayerToFront(layer) {
+        if (layer) layer.style.zIndex = String(++xuiLayerZ);
+    }
+
+    function enableDrag(target, handle = target) {
+        let dragging = false;
+        let startX = 0;
+        let startY = 0;
+        let initialLeft = 0;
+        let initialTop = 0;
+        let moved = false;
+
+        const moveTo = (left, top) => {
+            const rect = target.getBoundingClientRect();
+            const visibleEdge = Math.min(80, Math.max(32, Math.min(rect.width, rect.height) / 3));
+            const minLeft = visibleEdge - rect.width;
+            const maxLeft = window.innerWidth - visibleEdge;
+            const minTop = visibleEdge - rect.height;
+            const maxTop = window.innerHeight - visibleEdge;
+            target.style.left = `${Math.min(Math.max(minLeft, left), maxLeft)}px`;
+            target.style.top = `${Math.min(Math.max(minTop, top), maxTop)}px`;
+            target.style.right = 'auto';
+            target.style.bottom = 'auto';
+        };
+
+        handle.addEventListener('pointerdown', (e) => {
+            if (e.button !== undefined && e.button !== 0) return;
+            if (e.target.closest('button,input,select,textarea,a,.xp-close,.xp-checkbox,.xp-toggle-btn')) return;
+            dragging = true;
+            moved = false;
+            startX = e.clientX;
+            startY = e.clientY;
+            const rect = target.getBoundingClientRect();
+            initialLeft = rect.left;
+            initialTop = rect.top;
+            target.style.width = `${rect.width}px`;
+            target.style.transform = 'none';
+            target.classList.add('xui-panel-moved');
+            moveTo(initialLeft, initialTop);
+            handle.setPointerCapture?.(e.pointerId);
+            e.preventDefault();
+        });
+
+        handle.addEventListener('pointermove', (e) => {
+            if (!dragging) return;
+            const dx = e.clientX - startX;
+            const dy = e.clientY - startY;
+            if (Math.abs(dx) > 3 || Math.abs(dy) > 3) moved = true;
+            moveTo(initialLeft + dx, initialTop + dy);
+        });
+
+        const stopDrag = (e) => {
+            if (!dragging) return;
+            dragging = false;
+            handle.releasePointerCapture?.(e.pointerId);
+            target.dataset.dragMoved = moved ? 'true' : 'false';
+            setTimeout(() => { target.dataset.dragMoved = 'false'; }, 0);
+        };
+
+        handle.addEventListener('pointerup', stopDrag);
+        handle.addEventListener('pointercancel', stopDrag);
+    }
+
+    function setupFloatingPanel(layerId, panelId) {
+        const layer = document.getElementById(layerId);
+        const panel = document.getElementById(panelId);
+        if (!layer || !panel || panel.dataset.dragReady === 'true') return;
+        panel.dataset.dragReady = 'true';
+        panel.addEventListener('pointerdown', () => bringLayerToFront(layer));
+        enableDrag(panel, panel.querySelector('.xp-header') || panel);
+        bringLayerToFront(layer);
+    }
+
+    function showLayer(layer, panelId) {
+        applyThemeMode();
+        document.body.appendChild(layer);
+        layer.classList.remove('xui-layer-closing');
+        layer.style.display = 'block';
+        setupFloatingPanel(layer.id, panelId);
+    }
+
+    function closeLayer(layer, options = {}) {
+        if (!layer) return;
+        const { remove = true } = options;
+        layer.classList.add('xui-layer-closing');
+        setTimeout(() => {
+            layer.classList.remove('xui-layer-closing');
+            if (remove) layer.remove();
+            else layer.style.display = 'none';
+        }, 150);
+    }
+
+    function createDraggableBubble(id, html, top, onOpen) {
+        if (document.getElementById(id)) return;
+        const btn = document.createElement('div');
+        btn.id = id;
+        btn.style.top = `${top}px`;
+        btn.innerHTML = html;
+        btn.title = id === 'xui-show-nodes-float-btn' ? '展示节点' : '3X-UI 工具';
+        document.body.appendChild(btn);
+
+        let isDragging = false;
+        let startX = 0;
+        let startY = 0;
+        let initialLeft = 0;
+        let initialTop = 0;
+        let hasMoved = false;
+
+        const onPointerDown = (e) => {
+            if (e.button !== undefined && e.button !== 0) return;
+            isDragging = true;
+            hasMoved = false;
+            startX = e.clientX;
+            startY = e.clientY;
+            const rect = btn.getBoundingClientRect();
+            initialLeft = rect.left;
+            initialTop = rect.top;
+            btn.style.right = 'auto';
+            btn.style.left = `${initialLeft}px`;
+            btn.style.top = `${initialTop}px`;
+            btn.setPointerCapture?.(e.pointerId);
+            e.preventDefault();
+        };
+
+        const onPointerMove = (e) => {
+            if (!isDragging) return;
+            const dx = e.clientX - startX;
+            const dy = e.clientY - startY;
+            if (Math.abs(dx) > 3 || Math.abs(dy) > 3) hasMoved = true;
+            const visibleEdge = 18;
+            const nextLeft = Math.min(Math.max(visibleEdge - btn.offsetWidth, initialLeft + dx), window.innerWidth - visibleEdge);
+            const nextTop = Math.min(Math.max(visibleEdge - btn.offsetHeight, initialTop + dy), window.innerHeight - visibleEdge);
+            btn.style.left = `${nextLeft}px`;
+            btn.style.top = `${nextTop}px`;
+        };
+
+        const onPointerUp = (e) => {
+            isDragging = false;
+            btn.releasePointerCapture?.(e.pointerId);
+        };
+
+        btn.addEventListener('pointerdown', onPointerDown);
+        btn.addEventListener('pointermove', onPointerMove);
+        btn.addEventListener('pointerup', onPointerUp);
+        btn.addEventListener('pointercancel', onPointerUp);
+        btn.addEventListener('click', () => {
+            if (!hasMoved) onOpen();
+        });
+    }
+
+    function refreshShowNodesFloatingBubble() {
+        const existing = document.getElementById('xui-show-nodes-float-btn');
+        if (!CONFIG.showNodesFloatButton) {
+            existing?.remove();
+            return;
+        }
+        if (!existing) createDraggableBubble('xui-show-nodes-float-btn', SVG_ICONS.list, 82, openShowNodes);
     }
 
     function getInboundStats(inbounds) {
@@ -2150,6 +2378,7 @@
     }
 
     async function openRoutingConfig() {
+        document.getElementById('xui-route-backdrop')?.remove();
         const hasOutbounds = await checkOutboundRulesExist();
         if (!hasOutbounds) {
             toast('缺失关键出站规则「UseIPv4v6 / UseIPv6v4」！请先点击「添加出站」按钮添加后再配置路由', 'error');
@@ -2204,7 +2433,6 @@
             <div id="xui-route-panel">
                 <div class="xp-header">
                     <div class="xp-title">一键配置路由规则</div>
-                    <div class="xp-subtitle">绑定路由规则IPv4/IPv6优先</div>
                     <div class="xp-close" id="route-close">${SVG_ICONS.close}</div>
                 </div>
                 <div class="xp-body">
@@ -2222,8 +2450,7 @@
                 </div>
             </div>
         `;
-        document.body.appendChild(backdrop);
-        backdrop.style.display = 'flex';
+        showLayer(backdrop, 'xui-route-panel');
 
         const list = document.getElementById('route-inbounds-list');
 
@@ -2275,10 +2502,9 @@
                     ${hint ? `<span class="route-hint">${hint}</span>` : ''}
                 </div>
             `;
-        }).join('') : '<div style="text-align:center;color:#999;padding:30px">暂无入站节点</div>';
+        }).join('') : '<div style="text-align:center;color:var(--xui-subtle);padding:30px">暂无入站节点</div>';
 
-        document.getElementById('route-close').onclick = () => backdrop.remove();
-        backdrop.onclick = e => { if (e.target === backdrop) backdrop.remove(); };
+        document.getElementById('route-close').onclick = () => closeLayer(backdrop);
 
         document.querySelectorAll('input[name="outbound"]').forEach(r => r.onchange = updateItemState);
 
@@ -2330,7 +2556,7 @@
                     const restartData = await restartXrayService();
                     if (restartData.success) {
                         toast('Xray 重启成功', 'success');
-                        setTimeout(() => { backdrop.remove(); location.reload(); }, 2000);
+                        setTimeout(() => { closeLayer(backdrop); setTimeout(() => location.reload(), 160); }, 2000);
                     }
                 } else {
                     throw new Error(updateData.msg || "保存失败");
@@ -2344,6 +2570,7 @@
     }
 
     async function openBatchDelete() {
+        document.getElementById('xui-delete-backdrop')?.remove();
         let nodes = [];
         let clientRows = [];
         try {
@@ -2386,7 +2613,6 @@
             <div id="xui-delete-panel">
                 <div class="xp-header">
                     <div class="xp-title">批量删除</div>
-                    <div class="xp-subtitle">选择入站会删除入站及全部关联用户；选择用户只删除客户本身</div>
                     <div class="xp-close" id="delete-close">${SVG_ICONS.close}</div>
                 </div>
                 <div class="xp-body">
@@ -2404,8 +2630,7 @@
                 </div>
             </div>
         `;
-        document.body.appendChild(backdrop);
-        backdrop.style.display = 'flex';
+        showLayer(backdrop, 'xui-delete-panel');
 
         const list = document.getElementById('delete-nodes-list');
         let deleteMode = 'inbounds';
@@ -2424,12 +2649,11 @@
                     <span class="client-email">${escapeHtml(item.email)}</span>
                     <span class="route-remark-port">绑定: ${escapeHtml(getClientInboundLabel(item))} | 状态: ${item.enable ? '启用' : '禁用'}</span>
                 </div>
-            `).join('') : `<div style="text-align:center;color:#999;padding:30px">暂无${deleteMode === 'inbounds' ? '节点' : '用户'}</div>`;
+            `).join('') : `<div style="text-align:center;color:var(--xui-subtle);padding:30px">暂无${deleteMode === 'inbounds' ? '节点' : '用户'}</div>`;
             updateDeleteSelectAllState();
         };
 
-        document.getElementById('delete-close').onclick = () => backdrop.remove();
-        backdrop.onclick = e => { if (e.target === backdrop) backdrop.remove(); };
+        document.getElementById('delete-close').onclick = () => closeLayer(backdrop);
 
         list.onclick = e => {
             const cb = e.target.closest('.xp-checkbox');
@@ -2491,11 +2715,15 @@
                     </div>
                 </div>
             `;
+            applyThemeMode();
             document.body.appendChild(confirmBackdrop);
-            confirmBackdrop.style.display = 'flex';
-            document.getElementById('confirm-no').onclick = () => confirmBackdrop.remove();
+            confirmBackdrop.style.display = 'block';
+            bringLayerToFront(confirmBackdrop);
+            const confirmPanel = confirmBackdrop.querySelector('.xp-confirm-panel');
+            enableDrag(confirmPanel, confirmPanel);
+            document.getElementById('confirm-no').onclick = () => closeLayer(confirmBackdrop);
             document.getElementById('confirm-yes').onclick = async () => {
-                confirmBackdrop.remove();
+                closeLayer(confirmBackdrop);
                 let successCount = 0;
                 for (const item of selected) {
                     try {
@@ -2516,7 +2744,7 @@
                 if (successCount > 0) {
                     const restartData = await restartXrayService();
                     if (restartData.success) {
-                        setTimeout(() => { backdrop.remove(); location.reload(); }, 2000);
+                        setTimeout(() => { closeLayer(backdrop); setTimeout(() => location.reload(), 160); }, 2000);
                     }
                 }
             };
@@ -2526,6 +2754,7 @@
     }
 
     async function openBatchUsers() {
+        document.getElementById('xui-delete-backdrop')?.remove();
         let nodes = [];
         try {
             if (!(await hasClientsApi())) {
@@ -2551,10 +2780,9 @@
         const backdrop = document.createElement('div');
         backdrop.id = 'xui-delete-backdrop';
         backdrop.innerHTML = `
-            <div id="xui-delete-panel">
+            <div id="xui-delete-panel" class="batch-users-panel">
                 <div class="xp-header">
                     <div class="xp-title">批量新增/绑定用户</div>
-                    <div class="xp-subtitle">选择单个入站节点，并创建指定数量用户绑定到该入站</div>
                     <div class="xp-close" id="batch-users-close">${SVG_ICONS.close}</div>
                 </div>
                 <div class="xp-body">
@@ -2565,14 +2793,12 @@
                         <input id="batch-users-count" type="number" min="1" max="500" value="10">
                         <button class="xp-create-btn-main" id="batch-users-apply">新增并绑定</button>
                     </div>
-                    <div style="font-size:12px;color:#6b7280">只对 3X-UI 3.x clients 模型生效。Shadowsocks chacha20 单用户入站不支持批量用户。</div>
+                    <div class="batch-user-note">只对 3X-UI 3.x clients 模型生效。Shadowsocks chacha20 单用户入站不支持批量用户</div>
                 </div>
             </div>
         `;
-        document.body.appendChild(backdrop);
-        backdrop.style.display = 'flex';
-        document.getElementById('batch-users-close').onclick = () => backdrop.remove();
-        backdrop.onclick = e => { if (e.target === backdrop) backdrop.remove(); };
+        showLayer(backdrop, 'xui-delete-panel');
+        document.getElementById('batch-users-close').onclick = () => closeLayer(backdrop);
         document.getElementById('batch-users-apply').onclick = async () => {
             const inboundId = document.getElementById('batch-users-inbound').value;
             const count = Math.max(1, Math.min(500, parseInt(document.getElementById('batch-users-count').value, 10) || 1));
@@ -2587,7 +2813,7 @@
             try {
                 const successCount = await addBatchClientsToInbound(node.inbound, count);
                 toast(`已新增并绑定 ${successCount} 个用户`, 'success');
-                setTimeout(() => { backdrop.remove(); location.reload(); }, 1200);
+                setTimeout(() => { closeLayer(backdrop); setTimeout(() => location.reload(), 160); }, 1200);
             } catch (e) {
                 toast('批量新增用户失败: ' + e.message, 'error');
                 btn.disabled = false;
@@ -2597,6 +2823,7 @@
     }
 
     async function openShowNodes() {
+        document.getElementById('xui-shownodes-backdrop')?.remove();
         let results = [];
         let stats= {};
         let protocolList;
@@ -2624,7 +2851,6 @@
                     <div class="xp-header-content">
                         <div>
                             <div class="xp-title">节点列表</div>
-                            <div class="xp-subtitle">查看所有节点链接</div>
                         </div>
                         <button class="xp-create-btn-main" id="shownodes-copy-all">${SVG_ICONS.copy} 复制全部节点</button>
                     </div>
@@ -2635,8 +2861,7 @@
                 </div>
             </div>
         `;
-        document.body.appendChild(backdrop);
-        backdrop.style.display = 'flex';
+        showLayer(backdrop, 'xui-shownodes-panel');
 
         function formatProtocolList(stats) {
             if (!stats.protocols || Object.keys(stats.protocols).length === 0) return '';
@@ -2682,7 +2907,7 @@
                     ${linksHtml}
                 </div>
             `;
-        }).join('') : '<div style="text-align:center;color:#999;padding:30px">暂无可用节点链接</div>');
+        }).join('') : '<div style="text-align:center;color:var(--xui-subtle);padding:30px">暂无可用节点链接</div>');
 
         if (results.length === 0) {
             const copyAllBtn = document.getElementById('shownodes-copy-all');
@@ -2700,8 +2925,7 @@
             toast('已复制到剪贴板', 'success');
         };
 
-        document.getElementById('shownodes-close').onclick = () => backdrop.remove();
-        backdrop.onclick = e => { if (e.target === backdrop) backdrop.remove(); };
+        document.getElementById('shownodes-close').onclick = () => closeLayer(backdrop);
 
         document.getElementById('shownodes-copy-all').onclick = () => {
             const allLinks = results.flatMap(r => r.links).join('\n');
@@ -2733,7 +2957,7 @@
         createButton.disabled = false;
         updateCreateButtonText();
         if (successCount > 0) setTimeout(() => location.reload(), 1500);
-        else toast('所有选中节点创建失败或遇到问题。', 'error');
+        else toast('所有选中节点创建失败或遇到问题', 'error');
     }
 
     function updateCreateButtonText() {
@@ -2804,26 +3028,26 @@
                 }
             });
             saveConfig(newConfig);
+            refreshShowNodesFloatingBubble();
             updateProtocolInfoView();
             showProtocolsView();
         };
     }
 
-    function updateHeader(title, subtitle) {
+    function updateHeader(title) {
         document.getElementById('xp-title').innerText = title;
-        document.getElementById('xp-subtitle').innerText = subtitle;
     }
 
     function showProtocolsView() {
-        document.getElementById('xp-protocols-view').style.display = 'block';
+        document.getElementById('xp-protocols-view').style.display = 'grid';
         document.getElementById('xp-config-view').style.display = 'none';
-        updateHeader('3X-UI多功能脚本', '3X-UI一键生成节点 (VLESS/VMESS/SS) & 一键关闭订阅访问 & 一键添加出站规则 & 一键配置路由规则 & 一键配删除入站节点 & 节点链接展示');
+        updateHeader('3X-UI多功能脚本');
         document.getElementById('xp-footer').innerHTML = `
             <div class="xp-select-all" id="xp-select-all-btn">
                 <div class="xp-checkbox" id="xp-select-all-cb" style="margin-right: 8px;"></div>
                 全选
             </div>
-            <div style="display:flex; gap:10px; align-items:center;">
+            <div class="xp-footer-actions">
                 <button class="xp-danger-btn" id="xp-disable-sub-btn">${SVG_ICONS.shieldOff} 关闭订阅</button>
                 <button class="xp-action-btn" id="xp-show-nodes-btn">${SVG_ICONS.list} 展示节点</button>
                 <button class="xp-action-btn" id="xp-add-outbound-btn">${SVG_ICONS.plus} 添加出站</button>
@@ -2843,10 +3067,11 @@
         document.getElementById('config-target').value = CONFIG.target;
         document.getElementById('config-serverName').value = CONFIG.serverName;
         document.getElementById('config-randomPortMode').checked = CONFIG.randomPortMode;
+        document.getElementById('config-showNodesFloatButton').checked = CONFIG.showNodesFloatButton;
 
         document.getElementById('xp-protocols-view').style.display = 'none';
         document.getElementById('xp-config-view').style.display = 'block';
-        updateHeader('全局配置', '修改配置后将保存到浏览器。');
+        updateHeader('全局配置');
         document.getElementById('xp-footer').innerHTML = `
             <a class="xp-footer-link" id="xp-return-protocols-btn">← 返回</a>
             <div></div>
@@ -2882,9 +3107,8 @@
 
     function setupGlobalEvents() {
         const bd = document.getElementById('xui-backdrop');
-        const closeModal = () => { bd.style.display = 'none'; };
+        const closeModal = () => closeLayer(bd, { remove: false });
         document.getElementById('xp-close-btn').addEventListener('click', closeModal);
-        bd.addEventListener('click', (e) => { if(e.target === bd) closeModal(); });
         document.getElementById('xp-footer').addEventListener('click', (e) => {
             const returnBtn = e.target.closest('#xp-return-protocols-btn');
             if (returnBtn) {
@@ -2932,7 +3156,7 @@
                     </div>
                     <div class="xp-info-panel" id="info-vless_xhttp_enc"><div class="xp-info-content"><div class="xp-info-title">配置详情</div><div class="xp-info-list"><div class="xp-info-item">Auth: ML-KEM-768</div><div class="xp-info-item">安全: none</div></div></div></div>
                 </div>
-                <div class="xp-protocol-item selected" data-protocol="vless_xhttp_enc_tls">
+                <div class="xp-protocol-item ${tlsDisabled ? 'disabled' : 'selected'}" data-protocol="vless_xhttp_enc_tls">
                     <div class="xp-protocol-header">
                         <div class="xp-protocol-main"><div class="xp-protocol-icon">${SVG_ICONS.ladder}</div><div class="xp-protocol-name">VLESS XHTTP Encryption (Post-Quantum) (TLS)</div></div>
                         <div class="xp-protocol-actions">${renderCheckbox('vless_xhttp_enc_tls', !tlsDisabled, tlsDisabled)}<button class="xp-toggle-btn" id="toggle-vless_xhttp_enc_tls">${SVG_ICONS.toggle}</button></div>
@@ -2946,7 +3170,7 @@
                     </div>
                     <div class="xp-info-panel" id="info-vless_ws"><div class="xp-info-content"><div class="xp-info-title">配置详情</div><div class="xp-info-list"><div class="xp-info-item">传输: WS</div><div class="xp-info-item">安全: none</div></div></div></div>
                 </div>
-                <div class="xp-protocol-item selected" data-protocol="vless_ws_tls">
+                <div class="xp-protocol-item ${tlsDisabled ? 'disabled' : 'selected'}" data-protocol="vless_ws_tls">
                     <div class="xp-protocol-header">
                         <div class="xp-protocol-main"><div class="xp-protocol-icon">${SVG_ICONS.ladder}</div><div class="xp-protocol-name">VLESS WS (TLS)</div></div>
                         <div class="xp-protocol-actions">${renderCheckbox('vless_ws_tls', !tlsDisabled, tlsDisabled)}<button class="xp-toggle-btn" id="toggle-vless_ws_tls">${SVG_ICONS.toggle}</button></div>
@@ -2960,14 +3184,14 @@
                     </div>
                     <div class="xp-info-panel" id="info-vmess_ws"><div class="xp-info-content"><div class="xp-info-title">配置详情</div><div class="xp-info-list"><div class="xp-info-item">传输: WS</div><div class="xp-info-item">安全: auto</div></div></div></div>
                 </div>
-                <div class="xp-protocol-item selected" data-protocol="vmess_ws_tls">
+                <div class="xp-protocol-item ${tlsDisabled ? 'disabled' : 'selected'}" data-protocol="vmess_ws_tls">
                     <div class="xp-protocol-header">
                         <div class="xp-protocol-main"><div class="xp-protocol-icon">${SVG_ICONS.ladder}</div><div class="xp-protocol-name">VMESS WS (TLS)</div></div>
                         <div class="xp-protocol-actions">${renderCheckbox('vmess_ws_tls', !tlsDisabled, tlsDisabled)}<button class="xp-toggle-btn" id="toggle-vmess_ws_tls">${SVG_ICONS.toggle}</button></div>
                     </div>
                     <div class="xp-info-panel" id="info-vmess_ws_tls"><div class="xp-info-content"><div class="xp-info-title">配置详情</div><div class="xp-info-list"><div class="xp-info-item">传输: WS</div><div class="xp-info-item">安全: tls</div></div></div></div>
                 </div>
-                <div class="xp-protocol-item ${tlsDisabled ? '' : 'selected'}" data-protocol="hysteria2">
+                <div class="xp-protocol-item ${tlsDisabled ? 'disabled' : 'selected'}" data-protocol="hysteria2">
                     <div class="xp-protocol-header">
                         <div class="xp-protocol-main"><div class="xp-protocol-icon">${SVG_ICONS.ladder}</div><div class="xp-protocol-name">HYSTERIA2 (TLS)</div></div>
                         <div class="xp-protocol-actions">${renderCheckbox('hysteria2', !tlsDisabled, tlsDisabled)}<button class="xp-toggle-btn" id="toggle-hysteria2">${SVG_ICONS.toggle}</button></div>
@@ -3007,6 +3231,7 @@
                 <div class="xp-config-group"><label for="config-target" class="xp-config-label">Reality Target</label><input type="text" id="config-target" class="xp-config-input" value="${CONFIG.target}"></div>
                 <div class="xp-config-group"><label for="config-serverName" class="xp-config-label">Reality SNI</label><input type="text" id="config-serverName" class="xp-config-input" value="${CONFIG.serverName}"></div>
                 <div class="xp-config-group"><div class="xp-config-checkbox-group"><input type="checkbox" id="config-randomPortMode" ${CONFIG.randomPortMode ? 'checked' : ''}><label for="config-randomPortMode" class="xp-config-label">启用随机端口模式 (10000-60000)</label></div></div>
+                <div class="xp-config-group"><div class="xp-config-checkbox-group"><input type="checkbox" id="config-showNodesFloatButton" ${CONFIG.showNodesFloatButton ? 'checked' : ''}><label for="config-showNodesFloatButton" class="xp-config-label">显示节点浮动按钮</label></div></div>
             </div>
         `;
     }
@@ -3028,7 +3253,7 @@
             bd.innerHTML = `
                 <div id="xui-panel">
                     <div class="xp-header">
-                        <div class="xp-title" id="xp-title"></div><div class="xp-subtitle" id="xp-subtitle"></div>
+                        <div class="xp-title" id="xp-title"></div>
                         <div class="xp-close" id="xp-close-btn">${SVG_ICONS.close}</div>
                     </div>
                     <div class="xp-body">${await renderProtocolsView()}${renderConfigView()}</div>
@@ -3040,59 +3265,17 @@
         }
         updateProtocolInfoView();
         showProtocolsView();
-        bd.style.display = 'flex';
+        showLayer(bd, 'xui-panel');
     }
 
     function createFloatingBubble() {
-        if (document.getElementById('xui-float-btn')) return;
-        const btn = document.createElement('div');
-        btn.id = 'xui-float-btn';
-        btn.innerHTML = SVG_ICONS.main;
-        document.body.appendChild(btn);
-
-        let isDragging = false;
-        let startX, startY, initialLeft, initialTop;
-        let hasMoved = false;
-
-        const onMouseDown = (e) => {
-            isDragging = true;
-            hasMoved = false;
-            startX = e.clientX;
-            startY = e.clientY;
-            const rect = btn.getBoundingClientRect();
-            initialLeft = rect.left;
-            initialTop = rect.top;
-            btn.style.right = 'auto';
-            btn.style.left = `${initialLeft}px`;
-            btn.style.top = `${initialTop}px`;
-            e.preventDefault();
-        };
-
-        const onMouseMove = (e) => {
-            if (!isDragging) return;
-            const dx = e.clientX - startX;
-            const dy = e.clientY - startY;
-            if (Math.abs(dx) > 3 || Math.abs(dy) > 3) hasMoved = true;
-            btn.style.left = `${initialLeft + dx}px`;
-            btn.style.top = `${initialTop + dy}px`;
-        };
-
-        const onMouseUp = () => {
-            isDragging = false;
-        };
-
-        const onClick = (e) => {
-            if (!hasMoved) openUI();
-        };
-
-        btn.addEventListener('mousedown', onMouseDown);
-        window.addEventListener('mousemove', onMouseMove);
-        window.addEventListener('mouseup', onMouseUp);
-        btn.addEventListener('click', onClick);
+        createDraggableBubble('xui-float-btn', SVG_ICONS.main, 20, openUI);
+        refreshShowNodesFloatingBubble();
     }
 
     function init() {
         injectStyles();
+        watchThemeMode();
         createFloatingBubble();
     }
 
