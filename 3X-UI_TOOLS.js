@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         3X-UI多功能脚本
 // @namespace    http://tampermonkey.net/
-// @version      1.8
+// @version      1.9
 // @description  3X-UI 多功能工具：一键创建/查看/删除节点、关闭订阅、出站/路由配置，适配 2.x/3.x
 // @icon         https://avatars.githubusercontent.com/u/86963023
 // @author       Yannick Young
@@ -1014,6 +1014,14 @@
             #delete-nodes-list{max-height:420px;overflow-y:auto;border:1px solid #eee;border-radius:8px}
             .delete-nodes-header{margin-bottom:12px;display:flex;align-items:center;justify-content:space-between}
             #delete-apply-btn{background:#ef4444;color:white;padding:10px 20px;border-radius:8px}
+            .batch-user-form{display:flex;align-items:center;gap:10px;margin-bottom:12px;padding:12px;border:1px solid #e5e7eb;border-radius:8px;background:#f9fafb}
+            .batch-user-form select,.batch-user-form input{height:36px;border:1px solid #d1d5db;border-radius:6px;padding:0 10px;background:white;color:#1f2937}
+            .batch-user-form select{min-width:260px;flex:1}
+            .batch-user-form input{width:110px}
+            .batch-tabs{display:flex;gap:8px;margin-bottom:12px}
+            .batch-tab{padding:8px 12px;border:1px solid #d1d5db;border-radius:6px;background:white;color:#374151;cursor:pointer}
+            .batch-tab.active{background:#1f2937;color:white;border-color:#1f2937}
+            .client-email{font-family:SF Mono,Menlo,Monaco,Consolas,monospace;font-size:12px;color:#374151}
             #xui-delete-panel .xp-body, #xui-route-panel .xp-body {padding-bottom:0}
             .radio-group{margin-bottom:16px;display:flex;gap:16px;align-items:center}
             .route-remark-port{color:#6b7280;font-size:12px;margin-left:auto;margin-right:120px}
@@ -1083,6 +1091,7 @@
 
     let CSRF_TOKEN = '';
     let PANEL_MAJOR_VERSION;
+    let PANEL_V3_CONFIRMED = false;
 
     function isUnsafeMethod(method) {
         return !['GET', 'HEAD', 'OPTIONS', 'TRACE'].includes(String(method || 'GET').toUpperCase());
@@ -1102,8 +1111,22 @@
             });
             const version = data?.obj?.currentVersion || data?.obj?.latestVersion || '';
             PANEL_MAJOR_VERSION = parseMajorVersion(version);
+            if (PANEL_MAJOR_VERSION >= 3) PANEL_V3_CONFIRMED = true;
         } catch (e) {
-            PANEL_MAJOR_VERSION = 2;
+            if (PANEL_V3_CONFIRMED) {
+                PANEL_MAJOR_VERSION = 3;
+            } else {
+                try {
+                    const data = await rawXhrJson(`${getBasePath()}/panel/api/clients/list`, {
+                        method: 'GET',
+                        skipCsrf: true
+                    });
+                    PANEL_MAJOR_VERSION = data && data.success !== false ? 3 : 2;
+                    if (PANEL_MAJOR_VERSION >= 3) PANEL_V3_CONFIRMED = true;
+                } catch (_) {
+                    PANEL_MAJOR_VERSION = 2;
+                }
+            }
         }
         return PANEL_MAJOR_VERSION;
     }
@@ -1371,6 +1394,10 @@
         try {
             const data = await fetchJson(`${getBasePath()}/panel/api/clients/list`, { method: 'GET' });
             CLIENTS_API_AVAILABLE = data && data.success !== false;
+            if (CLIENTS_API_AVAILABLE) {
+                PANEL_MAJOR_VERSION = 3;
+                PANEL_V3_CONFIRMED = true;
+            }
         } catch (e) {
             if (e.status === 403) throw e;
             CLIENTS_API_AVAILABLE = false;
@@ -1446,6 +1473,53 @@
             });
         }
         return data;
+    }
+
+    function createRandomClientForInbound(inbound) {
+        const protocol = inbound.protocol;
+        const settings = typeof inbound.settings === 'string' ? JSON.parse(inbound.settings || '{}') : (inbound.settings || {});
+        const client = {
+            email: randomLowerAndNum(8),
+            subId: randomLowerAndNum(16),
+            limitIp: 0,
+            totalGB: 0,
+            expiryTime: 0,
+            enable: true,
+            tgId: 0,
+            comment: '',
+            reset: 0,
+            flow: ''
+        };
+        if (protocol === 'vless' || protocol === 'vmess') {
+            client.id = randomUUID();
+            client.security = protocol === 'vmess' ? (settings.encryption || 'auto') : '';
+        } else if (protocol === 'trojan') {
+            client.password = randomLowerAndNum(20);
+        } else if (protocol === 'hysteria') {
+            client.auth = randomLowerAndNum(20);
+        } else if (protocol === 'shadowsocks') {
+            const method = settings.method || '';
+            if (!method.includes('aes-')) throw new Error('该 Shadowsocks 入站不支持多用户 clients');
+            const keyLength = method.includes('aes-128') ? 16 : 32;
+            client.password = randomBase64(keyLength);
+        } else {
+            throw new Error(`协议 ${protocol} 不支持批量用户`);
+        }
+        return client;
+    }
+
+    async function addBatchClientsToInbound(inbound, count) {
+        if (!(await hasClientsApi())) {
+            throw new Error('批量新增/绑定用户需要 3X-UI 3.x clients API');
+        }
+        let successCount = 0;
+        for (let i = 0; i < count; i++) {
+            const client = createRandomClientForInbound(inbound);
+            const data = await addClientToInbound(client, inbound.id, inbound.protocol);
+            if (!data.success) throw new Error(data.msg || `用户 ${client.email} 创建失败`);
+            successCount++;
+        }
+        return successCount;
     }
 
     async function createInboundWithClients(payload) {
@@ -2292,16 +2366,34 @@
             return;
         }
 
+        const clients = clientRows.map(client => ({
+            email: client.email,
+            inboundIds: Array.isArray(client.inboundIds) ? client.inboundIds : [],
+            enable: client.enable !== false
+        })).filter(client => client.email);
+        const inboundById = new Map(nodes.map(node => [Number(node.id), node]));
+        const getClientInboundLabel = client => {
+            const labels = client.inboundIds
+                .map(id => inboundById.get(Number(id)))
+                .filter(Boolean)
+                .map(node => `${node.remark}:${node.port}/${node.protocol}`);
+            return labels.length ? labels.join(' | ') : '未绑定入站';
+        };
+
         const backdrop = document.createElement('div');
         backdrop.id = 'xui-delete-backdrop';
         backdrop.innerHTML = `
             <div id="xui-delete-panel">
                 <div class="xp-header">
-                    <div class="xp-title">批量删除节点</div>
-                    <div class="xp-subtitle">选择节点进行批量删除</div>
+                    <div class="xp-title">批量删除</div>
+                    <div class="xp-subtitle">选择入站会删除入站及全部关联用户；选择用户只删除客户本身</div>
                     <div class="xp-close" id="delete-close">${SVG_ICONS.close}</div>
                 </div>
                 <div class="xp-body">
+                    <div class="batch-tabs">
+                        <button class="batch-tab active" id="delete-tab-inbounds">按入站删除</button>
+                        <button class="batch-tab" id="delete-tab-clients">按用户删除</button>
+                    </div>
                     <div class="delete-nodes-header">
                         <div class="xp-select-all" id="delete-select-all">
                             <div class="xp-checkbox" id="delete-select-all-cb"></div>全选
@@ -2316,13 +2408,25 @@
         backdrop.style.display = 'flex';
 
         const list = document.getElementById('delete-nodes-list');
-        list.innerHTML = nodes.length ? nodes.map(item => `
-            <div class="route-item">
-                <div class="xp-checkbox" data-id="${item.id}"></div>
-                <span class="route-tag">${item.remark}</span>
-                <span class="route-remark-port">端口: ${item.port} | 类型: ${item.protocol}</span>
-            </div>
-        `).join('') : '<div style="text-align:center;color:#999;padding:30px">暂无节点</div>';
+        let deleteMode = 'inbounds';
+
+        const renderDeleteList = () => {
+            const items = deleteMode === 'inbounds' ? nodes : clients;
+            list.innerHTML = items.length ? items.map((item, index) => deleteMode === 'inbounds' ? `
+                <div class="route-item">
+                    <div class="xp-checkbox" data-id="${item.id}"></div>
+                    <span class="route-tag">${escapeHtml(item.remark)}</span>
+                    <span class="route-remark-port">端口: ${item.port} | 类型: ${item.protocol} | 用户: ${item.clientEmails.length}</span>
+                </div>
+            ` : `
+                <div class="route-item">
+                    <div class="xp-checkbox" data-index="${index}"></div>
+                    <span class="client-email">${escapeHtml(item.email)}</span>
+                    <span class="route-remark-port">绑定: ${escapeHtml(getClientInboundLabel(item))} | 状态: ${item.enable ? '启用' : '禁用'}</span>
+                </div>
+            `).join('') : `<div style="text-align:center;color:#999;padding:30px">暂无${deleteMode === 'inbounds' ? '节点' : '用户'}</div>`;
+            updateDeleteSelectAllState();
+        };
 
         document.getElementById('delete-close').onclick = () => backdrop.remove();
         backdrop.onclick = e => { if (e.target === backdrop) backdrop.remove(); };
@@ -2353,10 +2457,26 @@
             updateDeleteSelectAllState();
         };
 
+        document.getElementById('delete-tab-inbounds').onclick = () => {
+            deleteMode = 'inbounds';
+            document.getElementById('delete-tab-inbounds').classList.add('active');
+            document.getElementById('delete-tab-clients').classList.remove('active');
+            renderDeleteList();
+        };
+
+        document.getElementById('delete-tab-clients').onclick = () => {
+            deleteMode = 'clients';
+            document.getElementById('delete-tab-clients').classList.add('active');
+            document.getElementById('delete-tab-inbounds').classList.remove('active');
+            renderDeleteList();
+        };
+
         document.getElementById('delete-apply-btn').onclick = async () => {
-            const selected = Array.from(list.querySelectorAll('.xp-checkbox.checked')).map(cb => cb.dataset.id);
+            const selected = Array.from(list.querySelectorAll('.xp-checkbox.checked')).map(cb =>
+                deleteMode === 'inbounds' ? cb.dataset.id : clients[Number(cb.dataset.index)]?.email
+            ).filter(Boolean);
             if (selected.length === 0) {
-                toast('请选择至少一个节点', 'error');
+                toast(`请选择至少一个${deleteMode === 'inbounds' ? '节点' : '用户'}`, 'error');
                 return;
             }
             const confirmBackdrop = document.createElement('div');
@@ -2364,7 +2484,7 @@
             confirmBackdrop.innerHTML = `
                 <div class="xp-confirm-panel">
                     <div class="xp-confirm-title">确认删除</div>
-                    <div class="xp-confirm-content">确认删除 ${selected.length} 个选中节点?</div>
+                    <div class="xp-confirm-content">${deleteMode === 'inbounds' ? '确认删除选中入站及其全部关联用户' : '确认只删除选中用户'}，数量：${selected.length}</div>
                     <div class="xp-confirm-btns">
                         <button id="confirm-yes" class="xp-confirm-yes">是</button>
                         <button id="confirm-no" class="xp-confirm-no">否</button>
@@ -2377,17 +2497,22 @@
             document.getElementById('confirm-yes').onclick = async () => {
                 confirmBackdrop.remove();
                 let successCount = 0;
-                for (const id of selected) {
+                for (const item of selected) {
                     try {
-                        const node = nodes.find(item => String(item.id) === String(id));
-                        if (!node) throw new Error('节点不存在');
-                        const data = await deleteInboundWithClients(node.inbound, clientRows);
+                        let data;
+                        if (deleteMode === 'inbounds') {
+                            const node = nodes.find(node => String(node.id) === String(item));
+                            if (!node) throw new Error('节点不存在');
+                            data = await deleteInboundWithClients(node.inbound, clientRows);
+                        } else {
+                            data = await deleteClient(item);
+                        }
                         if (data.success) successCount++;
                     } catch (e) {
-                        toast(`删除节点 ${id} 失败: ${e.message}`, 'error');
+                        toast(`删除 ${item} 失败: ${e.message}`, 'error');
                     }
                 }
-                toast(`成功删除 ${successCount} 个节点`, 'success');
+                toast(`成功删除 ${successCount} 个${deleteMode === 'inbounds' ? '节点' : '用户'}`, 'success');
                 if (successCount > 0) {
                     const restartData = await restartXrayService();
                     if (restartData.success) {
@@ -2397,7 +2522,78 @@
             };
         };
 
-        updateDeleteSelectAllState();
+        renderDeleteList();
+    }
+
+    async function openBatchUsers() {
+        let nodes = [];
+        try {
+            if (!(await hasClientsApi())) {
+                toast('批量新增/绑定用户需要 3X-UI 3.x clients API', 'error');
+                return;
+            }
+            const data = await getInbounds({ full: true });
+            if (!data.success) throw new Error("获取节点列表失败");
+            nodes = data.obj
+                .filter(item => ['vless', 'vmess', 'trojan', 'hysteria', 'shadowsocks'].includes(item.protocol))
+                .map(item => ({
+                    id: item.id,
+                    remark: getInboundDisplayName(item),
+                    port: item.port,
+                    protocol: item.protocol.toUpperCase(),
+                    inbound: item
+                }));
+        } catch (e) {
+            toast('获取节点失败: ' + e.message, 'error');
+            return;
+        }
+
+        const backdrop = document.createElement('div');
+        backdrop.id = 'xui-delete-backdrop';
+        backdrop.innerHTML = `
+            <div id="xui-delete-panel">
+                <div class="xp-header">
+                    <div class="xp-title">批量新增/绑定用户</div>
+                    <div class="xp-subtitle">选择单个入站节点，并创建指定数量用户绑定到该入站</div>
+                    <div class="xp-close" id="batch-users-close">${SVG_ICONS.close}</div>
+                </div>
+                <div class="xp-body">
+                    <div class="batch-user-form">
+                        <select id="batch-users-inbound">
+                            ${nodes.map(item => `<option value="${item.id}">${escapeHtml(item.remark)} | ${item.protocol} | ${item.port}</option>`).join('')}
+                        </select>
+                        <input id="batch-users-count" type="number" min="1" max="500" value="10">
+                        <button class="xp-create-btn-main" id="batch-users-apply">新增并绑定</button>
+                    </div>
+                    <div style="font-size:12px;color:#6b7280">只对 3X-UI 3.x clients 模型生效。Shadowsocks chacha20 单用户入站不支持批量用户。</div>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(backdrop);
+        backdrop.style.display = 'flex';
+        document.getElementById('batch-users-close').onclick = () => backdrop.remove();
+        backdrop.onclick = e => { if (e.target === backdrop) backdrop.remove(); };
+        document.getElementById('batch-users-apply').onclick = async () => {
+            const inboundId = document.getElementById('batch-users-inbound').value;
+            const count = Math.max(1, Math.min(500, parseInt(document.getElementById('batch-users-count').value, 10) || 1));
+            const node = nodes.find(item => String(item.id) === String(inboundId));
+            if (!node) {
+                toast('请选择入站节点', 'error');
+                return;
+            }
+            const btn = document.getElementById('batch-users-apply');
+            btn.disabled = true;
+            btn.textContent = `正在新增 ${count} 个...`;
+            try {
+                const successCount = await addBatchClientsToInbound(node.inbound, count);
+                toast(`已新增并绑定 ${successCount} 个用户`, 'success');
+                setTimeout(() => { backdrop.remove(); location.reload(); }, 1200);
+            } catch (e) {
+                toast('批量新增用户失败: ' + e.message, 'error');
+                btn.disabled = false;
+                btn.textContent = '新增并绑定';
+            }
+        };
     }
 
     async function openShowNodes() {
@@ -2632,6 +2828,7 @@
                 <button class="xp-action-btn" id="xp-show-nodes-btn">${SVG_ICONS.list} 展示节点</button>
                 <button class="xp-action-btn" id="xp-add-outbound-btn">${SVG_ICONS.plus} 添加出站</button>
                 <button class="xp-action-btn" id="xp-route-config-btn">${SVG_ICONS.route} 路由规则</button>
+                <button class="xp-action-btn" id="xp-batch-users-btn">${SVG_ICONS.plus} 批量用户</button>
                 <button class="xp-danger-btn" id="xp-batch-delete-btn">${SVG_ICONS.close} 批量删除</button>
                 <a class="xp-footer-link" id="xp-go-config-btn">${SVG_ICONS.settings} 配置</a>
                 <button class="xp-create-btn-main" id="xp-create-btn-main">一键创建选中节点</button>
@@ -2664,6 +2861,7 @@
         document.getElementById('xp-show-nodes-btn').onclick = openShowNodes;
         document.getElementById('xp-add-outbound-btn').onclick = addOutboundRules;
         document.getElementById('xp-route-config-btn').onclick = openRoutingConfig;
+        document.getElementById('xp-batch-users-btn').onclick = openBatchUsers;
         document.getElementById('xp-batch-delete-btn').onclick = openBatchDelete;
 
         document.querySelectorAll('#xp-protocols-view .xp-toggle-btn').forEach(btn => {
