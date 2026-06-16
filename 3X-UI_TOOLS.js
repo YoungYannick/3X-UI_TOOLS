@@ -264,12 +264,14 @@
       genAccountLinks(scheme, inbound, settings) {
         const address = this.resolveInboundAddress(inbound);
         const accounts = Array.isArray(settings.accounts) ? settings.accounts : [];
+        const hash = this.genRemark(inbound, '', '');
+        const hashSuffix = hash ? `#${encodeURIComponent(hash)}` : '';
         if (accounts.length === 0 || settings.auth === 'noauth') {
-          return `${scheme}://${address}:${inbound.port}`;
+          return `${scheme}://${address}:${inbound.port}${hashSuffix}`;
         }
         return accounts
           .filter(account => account && account.user !== undefined && account.pass !== undefined)
-          .map(account => `${scheme}://${this.encodeUserinfo(account.user)}:${this.encodeUserinfo(account.pass)}@${address}:${inbound.port}`);
+          .map(account => `${scheme}://${this.encodeUserinfo(account.user)}:${this.encodeUserinfo(account.pass)}@${address}:${inbound.port}${hashSuffix}`);
       }
 
       handleStreamSettings(stream, streamNetwork, params) {
