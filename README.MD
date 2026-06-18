@@ -4,13 +4,15 @@
 
 ## 描述
 
-该脚本为 3X-UI / x-ui 面板添加了一个浮动按钮，点击后弹出界面，支持多种协议节点快速创建、订阅开关、出站与路由规则、批量删除和节点链接展示。脚本通过面板 API 自动化配置，已适配 3X-UI 2.x 与 3.x 的接口差异。当前版本：**2.0.4**
+该脚本为 3X-UI / x-ui 面板添加了一个浮动按钮，点击后弹出界面，支持多种协议节点快速创建、订阅开关、出站与路由规则、批量删除和节点链接展示。脚本通过面板 API 自动化配置，已适配 3X-UI 2.x 与 3.x 的接口差异。当前版本：**2.0.5**
 
 ## 功能
 
-- **一键生成节点**：支持以下协议的节点创建（VLESS/VMESS/Hysteria2/SS）：
+- **一键生成节点**：支持以下协议的节点创建（VLESS/VMESS/Hysteria2/SS/HTTP/Mixed）：
   - VLESS TCP REALITY VISION
   - VLESS XHTTP REALITY
+  - VLESS XHTTP (非 TLS)
+  - VLESS XHTTP (TLS)
   - VLESS XHTTP Encryption (Post-Quantum) (非 TLS)
   - VLESS XHTTP Encryption (Post-Quantum) (TLS)
   - VLESS WS (非 TLS)
@@ -18,6 +20,10 @@
   - VMESS WS (非 TLS)
   - VMESS WS (TLS)
   - HYSTERIA2 (TLS)
+  - HTTP (无账号密码)
+  - HTTP (账号密码)
+  - MIXED (无账号密码，生成 `socks5://` 链接)
+  - MIXED (账号密码，生成 `socks5://` 链接)
   - SHADOWSOCKS TCP (2022-BLAKE3-CHACHA20-POLY1305)
   - SHADOWSOCKS TCP (2022-BLAKE3-AES-256-GCM)
   - SHADOWSOCKS TCP (2022-BLAKE3-AES-128-GCM)
@@ -57,12 +63,21 @@
 ## 依赖
 
 - 浏览器支持 `crypto.getRandomValues()`（现代浏览器均支持）
-- 3X-UI 或 x-ui 面板的 API 接口。脚本会按版本选择 `/panel/api/*`、`/panel/*` 或 `/xui/*` 端点
-- TLS 入站配置不生成 `verifyPeerCertInNames` / `verifyPeerCertByName`。该字段对本脚本创建的入站证书配置不是必需项，因此兼容旧版 Xray-core；同时避免 Xray-core v26.2.6 起 `verifyPeerCertInNames` 被移除后启动失败
+- 3X-UI 或 x-ui 面板的 API 接口
 
 ## 更新日志
 
-### 2.0.4（当前版本）
+### 2.0.5（当前版本）
+- 修复 3X-UI 3.x TLS 节点固定对端证书 SHA-256 参数问题：创建 TLS 节点时会尝试通过 3X-UI 服务端获取当前面板 HTTPS 证书的真实 SHA-256 指纹，转为 64 位 hex 后写入 `pinnedPeerCertSha256`，获取失败则留空以避免生成错误 pin；TLS 分享链接支持 `pcs`
+- 增强 3X-UI 3.x 版本探测与 CSRF 兜底：`getPanelUpdateInfo` 获取失败或返回空版本时不会误判为旧版，`/panel/api/*` 的 POST 请求会主动携带 CSRF，并在 403 时刷新 token 重试
+- 修复 VLESS XHTTP 创建节点缺少 XHTTP Extra 的问题，新建 XHTTP 入站会保存 `xPaddingBytes` 并在展示链接中输出 `extra`
+- 新增普通 VLESS XHTTP 非 TLS/TLS 一键创建；新增 HTTP/Mixed 有无账号密码一键创建，并支持批量追加 HTTP/Mixed 的 `settings.accounts` 账号密码
+- 修复 3X-UI 3.x clients 模型下面按入站批量删除 HTTP/Mixed 时误查客户端并中断的问题；HTTP/Mixed 会直接删除入站
+- 调整批量新增账号/用户列表：HTTP/Mixed 无账号密码入站不再展示，只展示已有账号密码的 HTTP/Mixed 入站
+- 修复批量删除里的 HTTP/Mixed 用户数量统计与按用户删除：读取 `settings.accounts` 展示账号，删除单个账号时直接更新对应入站的账号列表
+- 处理 `SS_TCP_2022_BLAKE3_CHACHA20_POLY1305` 单密码入站：批量新增/绑定用户不再展示该类入站，批量删除按入站直接删除并在按用户删除中忽略其客户端用户模型
+
+### 2.0.4
 - 修复生成部分节点时备注丢失问题
 
 ### 2.0.3
@@ -211,7 +226,3 @@
 - **API 自动适配**：脚本会根据面板路径和 `/panel/api/server/getPanelUpdateInfo` 自动选择正确 API 端点
 - **浏览器要求**：支持现代浏览器（Chrome、Firefox、Edge 等），需要支持 ES6+ 语法
 
-## 贡献
-
-欢迎提交 Issue 或 Pull Request 以改进脚本
-作者：Yannick Young

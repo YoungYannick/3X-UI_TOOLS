@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         3X-UI多功能脚本
 // @namespace    http://tampermonkey.net/
-// @version      2.0.3
+// @version      2.0.5
 // @description  3X-UI 多功能工具：一键创建/查看/删除节点、关闭订阅、出站/路由配置，适配 2.x/3.x
 // @icon         https://avatars.githubusercontent.com/u/86963023
 // @author       Yannick Young
@@ -383,6 +383,63 @@
           params.set('host', host || '');
         }
         params.set('mode', xhttp.mode || 'auto');
+        if (typeof xhttp.xPaddingBytes === 'string' && xhttp.xPaddingBytes.length > 0) {
+          params.set('x_padding_bytes', xhttp.xPaddingBytes);
+        }
+        const extra = this.buildXhttpExtra(xhttp);
+        if (extra) {
+          params.set('extra', JSON.stringify(extra));
+        }
+      }
+
+      buildXhttpExtra(xhttp) {
+        if (!xhttp) return null;
+        const extra = {};
+        if (typeof xhttp.xPaddingBytes === 'string' && xhttp.xPaddingBytes.length > 0) {
+          extra.xPaddingBytes = xhttp.xPaddingBytes;
+        }
+        if (xhttp.xPaddingObfsMode === true) {
+          extra.xPaddingObfsMode = true;
+          ['xPaddingKey', 'xPaddingHeader', 'xPaddingPlacement', 'xPaddingMethod'].forEach(key => {
+            const value = xhttp[key];
+            if (typeof value === 'string' && value.length > 0) extra[key] = value;
+          });
+        }
+        const coreDefaults = { scMaxEachPostBytes: '1000000' };
+        [
+          'uplinkHTTPMethod',
+          'sessionPlacement',
+          'sessionKey',
+          'seqPlacement',
+          'seqKey',
+          'uplinkDataPlacement',
+          'uplinkDataKey',
+          'scMaxEachPostBytes'
+        ].forEach(key => {
+          const value = xhttp[key];
+          if (typeof value === 'string' && value.length > 0 && value !== coreDefaults[key]) {
+            extra[key] = value;
+          }
+        });
+        const headers = xhttp.headers || {};
+        const headersMap = {};
+        Object.entries(headers).forEach(([name, value]) => {
+          if (name.toLowerCase() !== 'host') headersMap[name] = value;
+        });
+        if (Object.keys(headersMap).length > 0) extra.headers = headersMap;
+        return Object.keys(extra).length > 0 ? extra : null;
+      }
+
+      applyXhttpExtraToObj(xhttp, obj) {
+        if (!xhttp) return;
+        if (typeof xhttp.xPaddingBytes === 'string' && xhttp.xPaddingBytes.length > 0) {
+          obj.x_padding_bytes = xhttp.xPaddingBytes;
+        }
+        const extra = this.buildXhttpExtra(xhttp);
+        if (!extra) return;
+        Object.entries(extra).forEach(([key, value]) => {
+          obj[key] = value;
+        });
       }
 
       handleSecurity(stream, params, flow) {
@@ -417,6 +474,13 @@
         if (settings.fingerprint) {
           params.set('fp', settings.fingerprint);
         }
+        if (settings.echConfigList) {
+          params.set('ech', settings.echConfigList);
+        }
+        const pins = this.normalizedPins(settings.pinnedPeerCertSha256);
+        if (pins.length > 0) {
+          params.set('pcs', pins.join(','));
+        }
         if (settings.allowInsecure) {
           params.set('allowInsecure', '1');
         }
@@ -438,7 +502,7 @@
         if (settings.echConfigList) {
           params.set('ech', settings.echConfigList);
         }
-        const pins = settings.pinnedPeerCertSha256 || [];
+        const pins = this.normalizedPins(settings.pinnedPeerCertSha256);
         if (pins.length > 0) {
           params.set('pinSHA256', pins.map(pin => this.hysteriaPinHex(pin)).join(','));
         }
@@ -471,10 +535,20 @@
       }
 
       applyExternalProxyHysteriaParams(ep, params) {
-        const pins = ep.pinnedPeerCertSha256 || [];
-        if (Array.isArray(pins) && pins.length > 0) {
+        const pins = this.normalizedPins(ep.pinnedPeerCertSha256);
+        if (pins.length > 0) {
           params.set('pinSHA256', pins.map(pin => this.hysteriaPinHex(pin)).join(','));
         }
+      }
+
+      normalizedPins(value) {
+        if (Array.isArray(value)) {
+          return value.map(pin => String(pin || '').trim()).filter(Boolean);
+        }
+        if (typeof value === 'string') {
+          return value.split(',').map(pin => pin.trim()).filter(Boolean);
+        }
+        return [];
       }
 
       hysteriaPinHex(pin) {
@@ -588,7 +662,8 @@
           const headers = xhttp.headers || {};
           obj.host = this.searchHost(headers);
         }
-        obj.mode = xhttp.mode || '';
+        obj.type = xhttp.mode || 'auto';
+        this.applyXhttpExtraToObj(xhttp, obj);
       }
 
       handleVmessTls(stream, obj) {
@@ -605,9 +680,44 @@
         if (settings.fingerprint) {
           obj.fp = settings.fingerprint;
         }
+        if (settings.echConfigList) {
+          obj.ech = settings.echConfigList;
+        }
+        const pins = this.normalizedPins(settings.pinnedPeerCertSha256);
+        if (pins.length > 0) {
+          obj.pcs = pins.join(',');
+        }
         if (settings.allowInsecure) {
           obj.allowInsecure = settings.allowInsecure;
         }
+      }
+
+      applyExternalProxyTlsParams(ep, params, security) {
+        if (!ep || security !== 'tls') return;
+        const sni = ep.sni || ep.dest || '';
+        if (sni) params.set('sni', sni);
+        if (ep.fingerprint) params.set('fp', ep.fingerprint);
+        if (Array.isArray(ep.alpn) && ep.alpn.length > 0) {
+          params.set('alpn', ep.alpn.filter(Boolean).join(','));
+        }
+        const pins = this.normalizedPins(ep.pinnedPeerCertSha256);
+        if (pins.length > 0) params.set('pcs', pins.join(','));
+        if (ep.echConfigList) params.set('ech', ep.echConfigList);
+        if (ep.allowInsecure) params.set('allowInsecure', '1');
+      }
+
+      applyExternalProxyTlsObj(ep, obj, security) {
+        if (!ep || security !== 'tls') return;
+        const sni = ep.sni || ep.dest || '';
+        if (sni) obj.sni = sni;
+        if (ep.fingerprint) obj.fp = ep.fingerprint;
+        if (Array.isArray(ep.alpn) && ep.alpn.length > 0) {
+          obj.alpn = ep.alpn.filter(Boolean).join(',');
+        }
+        const pins = this.normalizedPins(ep.pinnedPeerCertSha256);
+        if (pins.length > 0) obj.pcs = pins.join(',');
+        if (ep.echConfigList) obj.ech = ep.echConfigList;
+        if (ep.allowInsecure) obj.allowInsecure = true;
       }
 
       genMultipleLinks(protocol, credential, externalProxies, baseParams, inbound, email, stream, flow) {
@@ -627,6 +737,8 @@
               params.delete('alpn');
               params.delete('sni');
               params.delete('fp');
+              params.delete('ech');
+              params.delete('pcs');
               params.delete('allowInsecure');
               params.delete('pbk');
               params.delete('sid');
@@ -647,11 +759,19 @@
                 if (settings.fingerprint) {
                   params.set('fp', settings.fingerprint);
                 }
+                if (settings.echConfigList) {
+                  params.set('ech', settings.echConfigList);
+                }
+                const pins = this.normalizedPins(settings.pinnedPeerCertSha256);
+                if (pins.length > 0) {
+                  params.set('pcs', pins.join(','));
+                }
               }
             }
           } else {
             params.set('security', security);
           }
+          this.applyExternalProxyTlsParams(ep, params, params.get('security') || security);
           let link = `${protocol}://${credential}@${dest}:${port}`;
           const url = new URL(link);
           params.forEach((value, key) => {
@@ -680,9 +800,12 @@
               delete obj.alpn;
               delete obj.sni;
               delete obj.fp;
+              delete obj.ech;
+              delete obj.pcs;
               delete obj.allowInsecure;
             }
           }
+          this.applyExternalProxyTlsObj(ep, obj, obj.tls || security);
           const jsonStr = JSON.stringify(obj, null, 2);
           links.push('vmess://' + this.base64EncodeUtf8(jsonStr));
         });
@@ -712,11 +835,14 @@
               params.delete('alpn');
               params.delete('sni');
               params.delete('fp');
+              params.delete('ech');
+              params.delete('pcs');
               params.delete('allowInsecure');
             }
           } else {
             params.set('security', security);
           }
+          this.applyExternalProxyTlsParams(ep, params, params.get('security') || security);
           const encodedPart = btoa(encPart).replace(/=+$/, '');
           let link = `ss://${encodedPart}@${dest}:${port}`;
           const url = new URL(link);
@@ -1339,33 +1465,63 @@
         return match ? Number(match[1]) : 0;
     }
 
+    function setPanelMajorVersion(version) {
+        PANEL_MAJOR_VERSION = version;
+        if (PANEL_MAJOR_VERSION >= 3) PANEL_V3_CONFIRMED = true;
+        return PANEL_MAJOR_VERSION;
+    }
+
+    function isPanelApiUrl(url) {
+        try {
+            return new URL(url, window.location.href).pathname.includes('/panel/api/');
+        } catch (e) {
+            return String(url || '').includes('/panel/api/');
+        }
+    }
+
     async function getPanelMajorVersion() {
         if (typeof PANEL_MAJOR_VERSION === 'number') return PANEL_MAJOR_VERSION;
+
+        const injectedVersion = parseMajorVersion(window.X_UI_CUR_VER);
+        if (injectedVersion > 0) {
+            return setPanelMajorVersion(injectedVersion);
+        }
+
         try {
             const data = await rawXhrJson(`${getBasePath()}/panel/api/server/getPanelUpdateInfo`, {
                 method: 'GET',
                 skipCsrf: true
             });
             const version = data?.obj?.currentVersion || data?.obj?.latestVersion || '';
-            PANEL_MAJOR_VERSION = parseMajorVersion(version);
-            if (PANEL_MAJOR_VERSION >= 3) PANEL_V3_CONFIRMED = true;
-        } catch (e) {
-            if (PANEL_V3_CONFIRMED) {
-                PANEL_MAJOR_VERSION = 3;
-            } else {
-                try {
-                    const data = await rawXhrJson(`${getBasePath()}/panel/api/clients/list`, {
-                        method: 'GET',
-                        skipCsrf: true
-                    });
-                    PANEL_MAJOR_VERSION = data && data.success !== false ? 3 : 2;
-                    if (PANEL_MAJOR_VERSION >= 3) PANEL_V3_CONFIRMED = true;
-                } catch (_) {
-                    PANEL_MAJOR_VERSION = 2;
-                }
+            const majorVersion = data?.success !== false ? parseMajorVersion(version) : 0;
+            if (majorVersion > 0) {
+                return setPanelMajorVersion(majorVersion);
             }
+        } catch (e) {
         }
-        return PANEL_MAJOR_VERSION;
+
+        if (PANEL_V3_CONFIRMED) {
+            return setPanelMajorVersion(3);
+        }
+
+        try {
+            const data = await rawXhrJson(`${getBasePath()}/panel/api/clients/list`, {
+                method: 'GET',
+                skipCsrf: true
+            });
+            if (data && data.success !== false) {
+                return setPanelMajorVersion(3);
+            }
+        } catch (e) {}
+
+        try {
+            const token = await fetchCsrfToken();
+            if (token) {
+                return setPanelMajorVersion(3);
+            }
+        } catch (e) {}
+
+        return setPanelMajorVersion(2);
     }
 
     async function isPanelV3() {
@@ -1440,17 +1596,35 @@
 
     async function fetchJson(url, options = {}) {
         const requestOptions = { ...options };
-        const needsCsrf = !requestOptions.skipCsrf && isUnsafeMethod(requestOptions.method) && await isPanelV3();
+        const unsafeMethod = isUnsafeMethod(requestOptions.method);
+        const panelApiRequest = isPanelApiUrl(url);
+        let needsCsrf = !requestOptions.skipCsrf && unsafeMethod && panelApiRequest;
+        if (!needsCsrf && !requestOptions.skipCsrf && unsafeMethod) {
+            try {
+                needsCsrf = await isPanelV3();
+            } catch (e) {
+                needsCsrf = false;
+            }
+        }
         if (needsCsrf) {
-            requestOptions.csrfToken = await ensureCsrfToken();
+            try {
+                requestOptions.csrfToken = await ensureCsrfToken();
+            } catch (e) {
+                if (!panelApiRequest) throw e;
+            }
         }
         try {
             return await rawXhrJson(url, requestOptions);
         } catch (e) {
-            if (needsCsrf && e.status === 403) {
+            if (!requestOptions.skipCsrf && unsafeMethod && e.status === 403) {
                 CSRF_TOKEN = '';
-                requestOptions.csrfToken = await fetchCsrfToken();
-                return rawXhrJson(url, requestOptions);
+                try {
+                    requestOptions.csrfToken = await fetchCsrfToken();
+                    if (requestOptions.csrfToken) {
+                        setPanelMajorVersion(3);
+                        return rawXhrJson(url, requestOptions);
+                    }
+                } catch (_) {}
             }
             throw e;
         }
@@ -1570,6 +1744,31 @@
         );
     }
 
+    function cloneJsonValue(value) {
+        if (Array.isArray(value) || (value && typeof value === 'object')) {
+            try {
+                return JSON.parse(JSON.stringify(value));
+            } catch (_) {
+                return Array.isArray(value) ? [...value] : { ...value };
+            }
+        }
+        return value;
+    }
+
+    function parseInboundJsonField(value, fallback = {}) {
+        if (typeof value === 'string') {
+            const trimmed = value.trim();
+            if (!trimmed) return cloneJsonValue(fallback);
+            try {
+                return JSON.parse(trimmed);
+            } catch (_) {
+                return cloneJsonValue(fallback);
+            }
+        }
+        if (value === undefined || value === null) return cloneJsonValue(fallback);
+        return cloneJsonValue(value);
+    }
+
     function cloneInboundPayload(payload) {
         return {
             ...payload,
@@ -1595,6 +1794,38 @@
     function getPayloadClients(payload) {
         const settings = getPayloadSettings(payload);
         return Array.isArray(settings.clients) ? settings.clients : [];
+    }
+
+    function buildInboundUpdatePayload(inbound) {
+        const payload = {
+            id: Number(inbound.id),
+            up: Number(inbound.up || 0),
+            down: Number(inbound.down || 0),
+            total: Number(inbound.total || 0),
+            remark: inbound.remark || '',
+            subSortIndex: Number(inbound.subSortIndex || 1),
+            enable: inbound.enable !== false,
+            expiryTime: Number(inbound.expiryTime || 0),
+            trafficReset: inbound.trafficReset || 'never',
+            lastTrafficResetTime: Number(inbound.lastTrafficResetTime || 0),
+            listen: inbound.listen || '',
+            port: Number(inbound.port),
+            protocol: inbound.protocol,
+            settings: parseInboundJsonField(inbound.settings, {}),
+            streamSettings: parseInboundJsonField(inbound.streamSettings, {}),
+            sniffing: parseInboundJsonField(inbound.sniffing, {
+                enabled: false,
+                destOverride: ["http", "tls", "quic", "fakedns"],
+                metadataOnly: false,
+                routeOnly: false
+            }),
+            tag: inbound.tag || ''
+        };
+        if (inbound.shareAddrStrategy) payload.shareAddrStrategy = inbound.shareAddrStrategy;
+        if (inbound.shareAddr) payload.shareAddr = inbound.shareAddr;
+        if (inbound.nodeId !== undefined && inbound.nodeId !== null) payload.nodeId = inbound.nodeId;
+        if (inbound.originNodeGuid) payload.originNodeGuid = inbound.originNodeGuid;
+        return payload;
     }
 
     function inboundPayloadWithoutClients(payload) {
@@ -1632,8 +1863,7 @@
             const data = await fetchJson(`${getBasePath()}/panel/api/clients/list`, { method: 'GET' });
             CLIENTS_API_AVAILABLE = data && data.success !== false;
             if (CLIENTS_API_AVAILABLE) {
-                PANEL_MAJOR_VERSION = 3;
-                PANEL_V3_CONFIRMED = true;
+                setPanelMajorVersion(3);
             }
         } catch (e) {
             if (e.status === 403) throw e;
@@ -1661,6 +1891,38 @@
             };
         const legacy = {
             url: `${getBasePath()}/panel/inbound/add`,
+            options: {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(legacyInboundPayload(payload))
+            }
+        };
+        return (await isPanelV3()) ? fetchJsonFallback([v3Nested, v3Legacy, legacy]) : fetchJsonFallback([legacy, v3Nested, v3Legacy]);
+    }
+
+    async function updateInbound(inbound) {
+        const payload = buildInboundUpdatePayload(inbound);
+        const id = payload.id;
+        const v3Nested = {
+            url: `${getBasePath()}/panel/api/inbounds/update/${id}`,
+            options: {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(cloneInboundPayload(payload))
+            },
+            stopFallbackOn403: true
+        };
+        const v3Legacy = {
+            url: `${getBasePath()}/panel/api/inbounds/update/${id}`,
+            options: {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(legacyInboundPayload(payload))
+            },
+            stopFallbackOn403: true
+        };
+        const legacy = {
+            url: `${getBasePath()}/panel/inbound/update/${id}`,
             options: {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -1712,9 +1974,70 @@
         return data;
     }
 
+    function isAccountInboundProtocol(protocol) {
+        return ['http', 'mixed'].includes(String(protocol || '').toLowerCase());
+    }
+
+    function hasAccountPasswordSettings(inbound) {
+        const protocol = String(inbound?.protocol || '').toLowerCase();
+        if (!isAccountInboundProtocol(protocol)) return false;
+        const settings = parseInboundJsonField(inbound.settings, {});
+        const accounts = Array.isArray(settings.accounts) ? settings.accounts : [];
+        if (accounts.length === 0) return false;
+        return !(protocol === 'mixed' && settings.auth === 'noauth');
+    }
+
+    function getInboundAccountUsers(inbound) {
+        if (!hasAccountPasswordSettings(inbound)) return [];
+        const protocol = String(inbound.protocol || '').toLowerCase();
+        const settings = parseInboundJsonField(inbound.settings, {});
+        const accounts = Array.isArray(settings.accounts) ? settings.accounts : [];
+        return accounts.map((account, index) => {
+            const user = String(account?.user ?? '');
+            const pass = String(account?.pass ?? '');
+            return {
+                kind: 'account',
+                email: user || `账号${index + 1}`,
+                user,
+                pass,
+                accountIndex: index,
+                inboundId: Number(inbound.id),
+                inboundIds: [Number(inbound.id)],
+                enable: true,
+                protocol,
+                inbound
+            };
+        }).filter(account => account.user || account.pass);
+    }
+
+    function getShadowsocksMethod(inbound) {
+        if (String(inbound?.protocol || '').toLowerCase() !== 'shadowsocks') return '';
+        const settings = parseInboundJsonField(inbound.settings, {});
+        return String(settings.method || '').toLowerCase();
+    }
+
+    function isClientlessShadowsocks2022(inbound) {
+        return getShadowsocksMethod(inbound) === '2022-blake3-chacha20-poly1305';
+    }
+
+    function inboundSupportsClientsApiUsers(inbound) {
+        const protocol = String(inbound?.protocol || '').toLowerCase();
+        if (protocol === 'shadowsocks') {
+            return getShadowsocksMethod(inbound).includes('aes-');
+        }
+        return ['vless', 'vmess', 'trojan', 'hysteria'].includes(protocol);
+    }
+
+    function createRandomAccount() {
+        return {
+            user: randomLowerAndNum(10),
+            pass: randomLowerAndNum(20)
+        };
+    }
+
     function createRandomClientForInbound(inbound) {
         const protocol = inbound.protocol;
-        const settings = typeof inbound.settings === 'string' ? JSON.parse(inbound.settings || '{}') : (inbound.settings || {});
+        const settings = parseInboundJsonField(inbound.settings, {});
         const client = {
             email: randomLowerAndNum(8),
             subId: randomLowerAndNum(16),
@@ -1735,8 +2058,8 @@
         } else if (protocol === 'hysteria') {
             client.auth = randomLowerAndNum(20);
         } else if (protocol === 'shadowsocks') {
-            const method = settings.method || '';
-            if (!method.includes('aes-')) throw new Error('该 Shadowsocks 入站不支持多用户 clients');
+            const method = String(settings.method || '').toLowerCase();
+            if (!method.includes('aes-')) throw new Error('该 Shadowsocks 入站没有账号/客户端模型，不支持批量用户');
             const keyLength = method.includes('aes-128') ? 16 : 32;
             client.password = randomBase64(keyLength);
         } else {
@@ -1745,7 +2068,38 @@
         return client;
     }
 
+    async function addBatchAccountsToInbound(inbound, count) {
+        const protocol = String(inbound.protocol || '').toLowerCase();
+        if (!isAccountInboundProtocol(protocol)) {
+            throw new Error(`协议 ${inbound.protocol} 不支持 settings.accounts`);
+        }
+        const payload = buildInboundUpdatePayload(inbound);
+        const settings = parseInboundJsonField(payload.settings, {});
+        const accounts = Array.isArray(settings.accounts) ? settings.accounts.slice() : [];
+        for (let i = 0; i < count; i++) {
+            accounts.push(createRandomAccount());
+        }
+        settings.accounts = accounts;
+        if (protocol === 'mixed') {
+            settings.auth = 'password';
+            if (typeof settings.udp !== 'boolean') settings.udp = false;
+            if (settings.ip === undefined) settings.ip = '127.0.0.1';
+        } else if (protocol === 'http') {
+            if (typeof settings.allowTransparent !== 'boolean') settings.allowTransparent = false;
+        }
+        payload.settings = settings;
+        const data = await updateInbound(payload);
+        if (!data.success) throw new Error(data.msg || 'settings.accounts 更新失败');
+        return count;
+    }
+
     async function addBatchClientsToInbound(inbound, count) {
+        if (isAccountInboundProtocol(inbound.protocol)) {
+            return addBatchAccountsToInbound(inbound, count);
+        }
+        if (!inboundSupportsClientsApiUsers(inbound)) {
+            throw new Error('该入站没有账号/客户端模型，不支持批量新增/绑定用户');
+        }
         if (!(await hasClientsApi())) {
             throw new Error('批量新增/绑定用户需要 3X-UI 3.x clients API');
         }
@@ -1797,6 +2151,43 @@
         return fetchJson(`${getBasePath()}/panel/api/clients/del/${encodedEmail}?keepTraffic=0`, { method: 'POST' });
     }
 
+    async function deleteAccountFromInbound(accountRow) {
+        const inboundId = Number(accountRow.inboundId);
+        let inbound = accountRow.inbound;
+        try {
+            const detail = await getInboundDetail(inboundId);
+            if (detail.success && detail.obj) inbound = { ...inbound, ...detail.obj };
+        } catch (_) {}
+        if (!inbound?.id) throw new Error('账号所属入站不存在');
+
+        const payload = buildInboundUpdatePayload(inbound);
+        const settings = parseInboundJsonField(payload.settings, {});
+        const accounts = Array.isArray(settings.accounts) ? settings.accounts.slice() : [];
+        let removed = false;
+        const nextAccounts = accounts.filter((account, index) => {
+            if (removed) return true;
+            const sameUser = String(account?.user ?? '') === String(accountRow.user ?? '');
+            const samePass = String(account?.pass ?? '') === String(accountRow.pass ?? '');
+            const sameIndex = Number(index) === Number(accountRow.accountIndex);
+            if ((sameUser && samePass) || (!accountRow.user && !accountRow.pass && sameIndex)) {
+                removed = true;
+                return false;
+            }
+            return true;
+        });
+        if (!removed) throw new Error(`账号 ${accountRow.email || accountRow.user || accountRow.accountIndex + 1} 不存在`);
+
+        settings.accounts = nextAccounts;
+        if (String(inbound.protocol || '').toLowerCase() === 'mixed' && nextAccounts.length === 0) {
+            settings.auth = 'noauth';
+        }
+        payload.settings = settings;
+        const data = await updateInbound(payload);
+        if (!data.success) throw new Error(data.msg || '账号删除失败');
+        if (accountRow.inbound) accountRow.inbound.settings = settings;
+        return data;
+    }
+
     async function deleteInboundOnly(id) {
         return fetchByPanelVersion(
             { url: `${getBasePath()}/panel/api/inbounds/del/${id}`, options: { method: 'POST' } },
@@ -1806,6 +2197,7 @@
 
     function getInboundClientEmails(inbound, clientRows) {
         const emails = new Set();
+        if (isClientlessShadowsocks2022(inbound)) return [];
         if (Array.isArray(clientRows)) {
             clientRows.forEach(client => {
                 const inboundIds = Array.isArray(client.inboundIds) ? client.inboundIds : [];
@@ -1821,21 +2213,17 @@
         return Array.from(emails);
     }
 
-    function isClientlessShadowsocks2022(inbound) {
-        if (inbound.protocol !== 'shadowsocks') return false;
-        try {
-            const settings = typeof inbound.settings === 'string' ? JSON.parse(inbound.settings) : inbound.settings;
-            return settings?.method === '2022-blake3-chacha20-poly1305';
-        } catch (_) {
-            return false;
-        }
-    }
-
     async function deleteInboundWithClients(inbound, clientRows) {
+        if (isAccountInboundProtocol(inbound.protocol)) {
+            return deleteInboundOnly(inbound.id);
+        }
+        if (isClientlessShadowsocks2022(inbound)) {
+            return deleteInboundOnly(inbound.id);
+        }
         if (await hasClientsApi()) {
             const emails = getInboundClientEmails(inbound, clientRows);
             if (emails.length === 0) {
-                if (!isClientlessShadowsocks2022(inbound)) {
+                if (inboundSupportsClientsApiUsers(inbound)) {
                     throw new Error('新版客户端模型未找到该入站绑定的用户，已停止删除以避免残留客户端');
                 }
                 return deleteInboundOnly(inbound.id);
@@ -1981,6 +2369,176 @@
         return btoa(String.fromCharCode.apply(null, bytes));
     }
 
+    function createXhttpSettings(path, host = "") {
+        return {
+            path: path,
+            host: host,
+            mode: "auto",
+            xPaddingBytes: "100-1000",
+            headers: {}
+        };
+    }
+
+    function createPlainTcpStream() {
+        return {
+            network: "tcp",
+            security: "none",
+            externalProxy: [],
+            tcpSettings: {
+                acceptProxyProtocol: false,
+                header: { type: "none" }
+            }
+        };
+    }
+
+    function createTlsSettings(panelSettings, tlsServerName, alpn, tlsPins) {
+        return {
+            serverName: tlsServerName,
+            minVersion: "1.2",
+            maxVersion: "1.3",
+            cipherSuites: "",
+            rejectUnknownSni: false,
+            disableSystemRoot: false,
+            enableSessionResumption: false,
+            certificates: [{
+                certificateFile: panelSettings.webCertFile,
+                keyFile: panelSettings.webKeyFile,
+                oneTimeLoading: false,
+                usage: "encipherment",
+                buildChain: false
+            }],
+            alpn: alpn,
+            echServerKeys: "",
+            echForceQuery: "none",
+            settings: {
+                allowInsecure: false,
+                fingerprint: "chrome",
+                echConfigList: "",
+                pinnedPeerCertSha256: tlsPins
+            }
+        };
+    }
+
+    let PANEL_CERT_PIN_CACHE = null;
+
+    function normalizeNodeBasePath(path) {
+        const value = String(path || '').trim();
+        if (!value || value === '/') return '/';
+        const withLeadingSlash = value.startsWith('/') ? value : `/${value}`;
+        return withLeadingSlash.endsWith('/') ? withLeadingSlash : `${withLeadingSlash}/`;
+    }
+
+    function getCurrentPanelPathPrefix() {
+        const match = window.location.pathname.match(/(.*)\/(?:panel|xui)\//);
+        return match ? match[1] : '';
+    }
+
+    function normalizeFingerprintHost(host) {
+        let value = String(host || '').trim();
+        if (!value) return '';
+        if (/^https?:\/\//i.test(value)) {
+            try {
+                value = new URL(value).hostname;
+            } catch (e) {}
+        }
+        return value.replace(/^\[(.*)\]$/, '$1');
+    }
+
+    function normalizeCertPinToHex(pin) {
+        const value = String(pin || '').trim();
+        const hex = value.replace(/:/g, '');
+        if (/^[0-9a-fA-F]{64}$/.test(hex)) return hex.toLowerCase();
+
+        let base64 = value.replace(/-/g, '+').replace(/_/g, '/');
+        while (base64.length % 4) base64 += '=';
+        try {
+            const raw = atob(base64);
+            if (raw.length !== 32) return '';
+            return Array.from(raw, ch => ch.charCodeAt(0).toString(16).padStart(2, '0')).join('');
+        } catch (e) {
+            return '';
+        }
+    }
+
+    function buildPanelCertFingerprintCandidates(panelSettings) {
+        const candidates = [];
+        const seen = new Set();
+        const locationPort = Number(window.location.port) || (window.location.protocol === 'https:' ? 443 : 80);
+        const panelPort = Number(panelSettings?.webPort) || 0;
+        const locationHost = normalizeFingerprintHost(window.location.hostname);
+        const panelHost = normalizeFingerprintHost(panelSettings?.webDomain);
+        const configuredBasePath = normalizeNodeBasePath(panelSettings?.webBasePath || getCurrentPanelPathPrefix());
+        const locationBasePath = normalizeNodeBasePath(getCurrentPanelPathPrefix());
+
+        const add = (address, port, basePath) => {
+            const normalizedAddress = normalizeFingerprintHost(address);
+            const normalizedPort = Number(port);
+            const normalizedBasePath = normalizeNodeBasePath(basePath);
+            if (!normalizedAddress || !Number.isInteger(normalizedPort) || normalizedPort < 1 || normalizedPort > 65535) return;
+            const key = `${normalizedAddress}|${normalizedPort}|${normalizedBasePath}`;
+            if (seen.has(key)) return;
+            seen.add(key);
+            candidates.push({ address: normalizedAddress, port: normalizedPort, basePath: normalizedBasePath });
+        };
+
+        add(panelHost || locationHost, panelPort || locationPort, configuredBasePath);
+        add(locationHost, panelPort || locationPort, configuredBasePath);
+        add(locationHost, locationPort, locationBasePath);
+        return candidates;
+    }
+
+    async function getPanelCertPinSha256(panelSettings) {
+        const candidates = buildPanelCertFingerprintCandidates(panelSettings);
+        const cacheKey = JSON.stringify(candidates);
+        if (PANEL_CERT_PIN_CACHE && PANEL_CERT_PIN_CACHE.key === cacheKey) {
+            return PANEL_CERT_PIN_CACHE.value;
+        }
+
+        try {
+            if (!(await isPanelV3())) {
+                PANEL_CERT_PIN_CACHE = { key: cacheKey, value: [] };
+                return [];
+            }
+        } catch (e) {
+            PANEL_CERT_PIN_CACHE = { key: cacheKey, value: [] };
+            return [];
+        }
+
+        let lastError;
+        for (const candidate of candidates) {
+            try {
+                const data = await fetchJson(`${getBasePath()}/panel/api/nodes/certFingerprint`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        scheme: 'https',
+                        address: candidate.address,
+                        port: candidate.port,
+                        basePath: candidate.basePath,
+                        allowPrivateAddress: true
+                    })
+                });
+                if (!data?.success || !data.obj) {
+                    throw new Error(data?.msg || '证书指纹获取失败');
+                }
+                const pin = normalizeCertPinToHex(data.obj);
+                if (!pin) {
+                    throw new Error('证书指纹格式无效');
+                }
+                PANEL_CERT_PIN_CACHE = { key: cacheKey, value: [pin] };
+                return [pin];
+            } catch (e) {
+                lastError = e;
+            }
+        }
+
+        if (lastError) {
+            console.warn('3X-UI_TOOLS: TLS certificate fingerprint fetch failed, leaving pinnedPeerCertSha256 empty.', lastError);
+        }
+        PANEL_CERT_PIN_CACHE = { key: cacheKey, value: [] };
+        return [];
+    }
+
     async function getPanelSettings() {
         try {
             const data = await getPanelSettingsRaw();
@@ -1994,6 +2552,8 @@
     const PROTOCOL_FULL_NAMES = {
         'vision': 'VLESS_TCP_REALITY_VISION',
         'xhttp': 'VLESS_XHTTP_REALITY',
+        'vless_xhttp': 'VLESS_XHTTP',
+        'vless_xhttp_tls': 'VLESS_XHTTP_TLS',
         'vless_xhttp_enc': 'VLESS_XHTTP_ENCRYPTION',
         'vless_xhttp_enc_tls': 'VLESS_XHTTP_ENCRYPTION_TLS',
         'vless_ws': 'VLESS_WS',
@@ -2001,6 +2561,10 @@
         'vmess_ws': 'VMESS_WS',
         'vmess_ws_tls': 'VMESS_WS_TLS',
         'hysteria2': 'HYSTERIA2_TLS',
+        'http_noauth': 'HTTP_NOAUTH',
+        'http_auth': 'HTTP_AUTH',
+        'mixed_noauth': 'MIXED_NOAUTH',
+        'mixed_auth': 'MIXED_AUTH',
         'ss_blake3_chacha20_poly1305': 'SS_TCP_2022_BLAKE3_CHACHA20_POLY1305',
         'ss_blake3_aes_256_gcm': 'SS_TCP_2022_BLAKE3_AES_256_GCM',
         'ss_blake3_aes_128_gcm': 'SS_TCP_2022_BLAKE3_AES_128_GCM'
@@ -2032,6 +2596,7 @@
         const isTls = type.endsWith('_tls') || type === 'hysteria2';
         let panelSettings;
         let tlsServerName = '';
+        let tlsPins = [];
         if (isTls) {
             if (type !== 'hysteria2' && location.protocol !== 'https:') {
                 toast('TLS节点需要HTTPS访问面板', 'error');
@@ -2044,6 +2609,7 @@
                     return false;
                 }
                 tlsServerName = panelSettings.webDomain || location.hostname;
+                tlsPins = await getPanelCertPinSha256(panelSettings);
             } catch (e) {
                 toast(`${e.message}`, 'error');
                 return false;
@@ -2075,8 +2641,24 @@
                     }
                 }
             };
-            if (type === 'xhttp') { stream.xhttpSettings = { path: `/${randomShortId()}`, host: "" }; }
+            if (type === 'xhttp') { stream.xhttpSettings = createXhttpSettings(`/${randomShortId()}`); }
             else { stream.tcpSettings = { acceptProxyProtocol: false, header: { type: "none" } }; }
+
+        } else if (type === 'vless_xhttp' || type === 'vless_xhttp_tls') {
+            protocol = "vless";
+            settings = JSON.stringify({
+                clients: [{ id: uid, flow: "", email: email, subId: subId, limitIp: 0, totalGB: 0, expiryTime: 0, enable: true, tgId: "", comment: "", reset: 0 }],
+                decryption: "none", encryption: "none"
+            });
+            stream = {
+                network: "xhttp",
+                security: isTls ? "tls" : "none",
+                externalProxy: [],
+                xhttpSettings: createXhttpSettings(`/${randomShortId()}`, isTls ? tlsServerName : "")
+            };
+            if (isTls) {
+                stream.tlsSettings = createTlsSettings(panelSettings, tlsServerName, ["h2", "http/1.1", "h3"], tlsPins);
+            }
 
         } else if (type === 'vless_xhttp_enc' || type === 'vless_xhttp_enc_tls') {
             let auth;
@@ -2088,7 +2670,7 @@
             });
             stream = {
                 network: "xhttp", security: isTls ? "tls" : "none", externalProxy: [],
-                xhttpSettings: { path: `/${randomShortId()}`, host: isTls ? tlsServerName : "" }
+                xhttpSettings: createXhttpSettings(`/${randomShortId()}`, isTls ? tlsServerName : "")
             };
             if (isTls) {
                 stream.tlsSettings = {
@@ -2112,7 +2694,8 @@
                     settings: {
                         allowInsecure: false,
                         fingerprint: "chrome",
-                        echConfigList: ""
+                        echConfigList: "",
+                        pinnedPeerCertSha256: tlsPins
                     }
                 };
             }
@@ -2148,7 +2731,8 @@
                     settings: {
                         allowInsecure: false,
                         fingerprint: "chrome",
-                        echConfigList: ""
+                        echConfigList: "",
+                        pinnedPeerCertSha256: tlsPins
                     }
                 };
             }
@@ -2208,10 +2792,30 @@
                     settings: {
                         allowInsecure: false,
                         fingerprint: "chrome",
-                        echConfigList: ""
+                        echConfigList: "",
+                        pinnedPeerCertSha256: tlsPins
                     }
                 }
             };
+        } else if (type === 'http_noauth' || type === 'http_auth' || type === 'mixed_noauth' || type === 'mixed_auth') {
+            const withAuth = type === 'http_auth' || type === 'mixed_auth';
+            const accounts = withAuth ? [createRandomAccount()] : [];
+            if (type.startsWith('http_')) {
+                protocol = "http";
+                settings = JSON.stringify({
+                    accounts: accounts,
+                    allowTransparent: false
+                });
+            } else {
+                protocol = "mixed";
+                settings = JSON.stringify({
+                    auth: withAuth ? "password" : "noauth",
+                    accounts: accounts,
+                    udp: false,
+                    ip: "127.0.0.1"
+                });
+            }
+            stream = createPlainTcpStream();
         } else if (type.startsWith('ss_')) {
             protocol = "shadowsocks";
             const method = '2022-' + type.replace('ss_', '').replace(/_/g, '-');
@@ -2584,30 +3188,62 @@
         try {
             const data = await getInbounds({ full: true });
             if (!data.success) throw new Error("获取节点列表失败");
-            if (await hasClientsApi()) {
-                const clientsData = await getClientsList();
-                clientRows = Array.isArray(clientsData.obj) ? clientsData.obj : [];
+            try {
+                if (await hasClientsApi()) {
+                    const clientsData = await getClientsList();
+                    clientRows = Array.isArray(clientsData.obj) ? clientsData.obj : [];
+                }
+            } catch (_) {
+                clientRows = [];
             }
-            nodes = data.obj.map(item => ({
-                id: item.id,
-                remark: getInboundDisplayName(item),
-                port: item.port,
-                protocol: item.protocol.toUpperCase(),
-                clientEmails: getInboundClientEmails(item, clientRows),
-                inbound: item
-            }));
+            nodes = data.obj.map(item => {
+                const clientEmails = getInboundClientEmails(item, clientRows);
+                const accountUsers = getInboundAccountUsers(item);
+                const hasNoUsers = isClientlessShadowsocks2022(item);
+                const userCount = isAccountInboundProtocol(item.protocol) ? accountUsers.length : clientEmails.length;
+                return {
+                    id: item.id,
+                    remark: getInboundDisplayName(item),
+                    port: item.port,
+                    protocol: item.protocol.toUpperCase(),
+                    clientEmails,
+                    accountUsers,
+                    userCount,
+                    userCountLabel: hasNoUsers ? '无' : String(userCount),
+                    hasNoUsers,
+                    inbound: item
+                };
+            });
         } catch (e) {
             toast('获取节点失败: ' + e.message, 'error');
             return;
         }
 
-        const clients = clientRows.map(client => ({
+        const inboundById = new Map(nodes.map(node => [Number(node.id), node]));
+        const isVisibleClientUser = client => {
+            const inboundIds = Array.isArray(client.inboundIds) ? client.inboundIds : [];
+            if (inboundIds.length === 0) return true;
+            return inboundIds.some(id => {
+                const node = inboundById.get(Number(id));
+                return !node || !node.hasNoUsers;
+            });
+        };
+        const clientUsers = clientRows.map(client => ({
+            kind: 'client',
             email: client.email,
             inboundIds: Array.isArray(client.inboundIds) ? client.inboundIds : [],
             enable: client.enable !== false
-        })).filter(client => client.email);
-        const inboundById = new Map(nodes.map(node => [Number(node.id), node]));
+        })).filter(client => client.email && isVisibleClientUser(client));
+        const accountUsers = nodes.flatMap(node => node.accountUsers.map(account => ({ ...account, inbound: node.inbound })));
+        const clients = [...clientUsers, ...accountUsers];
+        const getDeleteUserName = client => client.email || client.user || '未命名用户';
+        const getDeleteUserType = client => client.kind === 'account' ? `${String(client.protocol || '').toUpperCase()} 账号` : '客户端';
+        const getDeleteItemName = item => (typeof item === 'string' || typeof item === 'number') ? String(item) : getDeleteUserName(item);
         const getClientInboundLabel = client => {
+            if (client.kind === 'account') {
+                const node = inboundById.get(Number(client.inboundId));
+                return node ? `${node.remark}:${node.port}/${node.protocol}` : '未绑定入站';
+            }
             const labels = client.inboundIds
                 .map(id => inboundById.get(Number(id)))
                 .filter(Boolean)
@@ -2649,13 +3285,13 @@
                 <div class="route-item">
                     <div class="xp-checkbox" data-id="${item.id}"></div>
                     <span class="route-tag">${escapeHtml(item.remark)}</span>
-                    <span class="route-remark-port">端口: ${item.port} | 类型: ${item.protocol} | 用户: ${item.clientEmails.length}</span>
+                    <span class="route-remark-port">端口: ${item.port} | 类型: ${item.protocol} | 用户: ${item.userCountLabel}</span>
                 </div>
             ` : `
                 <div class="route-item">
                     <div class="xp-checkbox" data-index="${index}"></div>
-                    <span class="client-email">${escapeHtml(item.email)}</span>
-                    <span class="route-remark-port">绑定: ${escapeHtml(getClientInboundLabel(item))} | 状态: ${item.enable ? '启用' : '禁用'}</span>
+                    <span class="client-email">${escapeHtml(getDeleteUserName(item))}</span>
+                    <span class="route-remark-port">绑定: ${escapeHtml(getClientInboundLabel(item))} | 类型: ${escapeHtml(getDeleteUserType(item))} | 状态: ${item.enable ? '启用' : '禁用'}</span>
                 </div>
             `).join('') : `<div style="text-align:center;color:var(--xui-subtle);padding:30px">暂无${deleteMode === 'inbounds' ? '节点' : '用户'}</div>`;
             updateDeleteSelectAllState();
@@ -2704,11 +3340,12 @@
         };
 
         document.getElementById('delete-apply-btn').onclick = async () => {
+            const mode = deleteMode;
             const selected = Array.from(list.querySelectorAll('.xp-checkbox.checked')).map(cb =>
-                deleteMode === 'inbounds' ? cb.dataset.id : clients[Number(cb.dataset.index)]?.email
+                mode === 'inbounds' ? cb.dataset.id : clients[Number(cb.dataset.index)]
             ).filter(Boolean);
             if (selected.length === 0) {
-                toast(`请选择至少一个${deleteMode === 'inbounds' ? '节点' : '用户'}`, 'error');
+                toast(`请选择至少一个${mode === 'inbounds' ? '节点' : '用户'}`, 'error');
                 return;
             }
             const confirmBackdrop = document.createElement('div');
@@ -2716,7 +3353,7 @@
             confirmBackdrop.innerHTML = `
                 <div class="xp-confirm-panel">
                     <div class="xp-confirm-title">确认删除</div>
-                    <div class="xp-confirm-content">${deleteMode === 'inbounds' ? '确认删除选中入站及其全部关联用户' : '确认只删除选中用户'}，数量：${selected.length}</div>
+                    <div class="xp-confirm-content">${mode === 'inbounds' ? '确认删除选中入站及其全部关联用户' : '确认只删除选中用户'}，数量：${selected.length}</div>
                     <div class="xp-confirm-btns">
                         <button id="confirm-yes" class="xp-confirm-yes">是</button>
                         <button id="confirm-no" class="xp-confirm-no">否</button>
@@ -2736,19 +3373,21 @@
                 for (const item of selected) {
                     try {
                         let data;
-                        if (deleteMode === 'inbounds') {
+                        if (mode === 'inbounds') {
                             const node = nodes.find(node => String(node.id) === String(item));
                             if (!node) throw new Error('节点不存在');
                             data = await deleteInboundWithClients(node.inbound, clientRows);
+                        } else if (item.kind === 'account') {
+                            data = await deleteAccountFromInbound(item);
                         } else {
-                            data = await deleteClient(item);
+                            data = await deleteClient(item.email);
                         }
                         if (data.success) successCount++;
                     } catch (e) {
-                        toast(`删除 ${item} 失败: ${e.message}`, 'error');
+                        toast(`删除 ${getDeleteItemName(item)} 失败: ${e.message}`, 'error');
                     }
                 }
-                toast(`成功删除 ${successCount} 个${deleteMode === 'inbounds' ? '节点' : '用户'}`, 'success');
+                toast(`成功删除 ${successCount} 个${mode === 'inbounds' ? '节点' : '用户'}`, 'success');
                 if (successCount > 0) {
                     const restartData = await restartXrayService();
                     if (restartData.success) {
@@ -2765,14 +3404,15 @@
         document.getElementById('xui-delete-backdrop')?.remove();
         let nodes = [];
         try {
-            if (!(await hasClientsApi())) {
-                toast('批量新增/绑定用户需要 3X-UI 3.x clients API', 'error');
-                return;
-            }
+            let clientsApiAvailable = false;
+            try {
+                clientsApiAvailable = await hasClientsApi();
+            } catch (_) {}
             const data = await getInbounds({ full: true });
             if (!data.success) throw new Error("获取节点列表失败");
+            const accountProtocols = ['http', 'mixed'];
             nodes = data.obj
-                .filter(item => ['vless', 'vmess', 'trojan', 'hysteria', 'shadowsocks'].includes(item.protocol))
+                .filter(item => (accountProtocols.includes(item.protocol) && hasAccountPasswordSettings(item)) || (clientsApiAvailable && inboundSupportsClientsApiUsers(item)))
                 .map(item => ({
                     id: item.id,
                     remark: getInboundDisplayName(item),
@@ -2780,6 +3420,10 @@
                     protocol: item.protocol.toUpperCase(),
                     inbound: item
                 }));
+            if (nodes.length === 0) {
+                toast('没有可批量新增账号/用户的入站', 'error');
+                return;
+            }
         } catch (e) {
             toast('获取节点失败: ' + e.message, 'error');
             return;
@@ -2799,9 +3443,9 @@
                             ${nodes.map(item => `<option value="${item.id}">${escapeHtml(item.remark)} | ${item.protocol} | ${item.port}</option>`).join('')}
                         </select>
                         <input id="batch-users-count" type="number" min="1" max="500" value="10">
-                        <button class="xp-create-btn-main" id="batch-users-apply">新增并绑定</button>
+                        <button class="xp-create-btn-main" id="batch-users-apply">新增账号/用户</button>
                     </div>
-                    <div class="batch-user-note">只对 3X-UI 3.x clients 模型生效。Shadowsocks chacha20 单用户入站不支持批量用户</div>
+                    <div class="batch-user-note">VLESS/VMESS/Trojan/Hysteria 与 Shadowsocks AES 2022 使用 3X-UI 3.x clients API；HTTP/Mixed 仅显示已有账号密码的入站，并直接追加 settings.accounts。Shadowsocks chacha20 单密码入站没有账号/客户端模型，不支持批量用户</div>
                 </div>
             </div>
         `;
@@ -2820,12 +3464,12 @@
             btn.textContent = `正在新增 ${count} 个...`;
             try {
                 const successCount = await addBatchClientsToInbound(node.inbound, count);
-                toast(`已新增并绑定 ${successCount} 个用户`, 'success');
+                toast(`已新增 ${successCount} 个账号/用户`, 'success');
                 setTimeout(() => { closeLayer(backdrop); setTimeout(() => location.reload(), 160); }, 1200);
             } catch (e) {
-                toast('批量新增用户失败: ' + e.message, 'error');
+                toast('批量新增账号/用户失败: ' + e.message, 'error');
                 btn.disabled = false;
-                btn.textContent = '新增并绑定';
+                btn.textContent = '新增账号/用户';
             }
         };
     }
@@ -3060,7 +3704,7 @@
                 <button class="xp-action-btn" id="xp-show-nodes-btn">${SVG_ICONS.list} 展示节点</button>
                 <button class="xp-action-btn" id="xp-add-outbound-btn">${SVG_ICONS.plus} 添加出站</button>
                 <button class="xp-action-btn" id="xp-route-config-btn">${SVG_ICONS.route} 路由规则</button>
-                <button class="xp-action-btn" id="xp-batch-users-btn">${SVG_ICONS.plus} 批量用户</button>
+                <button class="xp-action-btn" id="xp-batch-users-btn">${SVG_ICONS.plus} 批量账号/用户</button>
                 <button class="xp-danger-btn" id="xp-batch-delete-btn">${SVG_ICONS.close} 批量删除</button>
                 <a class="xp-footer-link" id="xp-go-config-btn">${SVG_ICONS.settings} 配置</a>
                 <button class="xp-create-btn-main" id="xp-create-btn-main">一键创建选中节点</button>
@@ -3157,6 +3801,20 @@
                     </div>
                     <div class="xp-info-panel" id="info-xhttp"><div class="xp-info-content"><div class="xp-info-title">配置详情</div><div class="xp-info-list"><div class="xp-info-item">传输: XHTTP</div><div class="xp-info-item">Target: <span id="info-xhttp-target">${CONFIG.target}</span></div><div class="xp-info-item">SNI: <span id="info-xhttp-sni">${CONFIG.serverName}</span></div></div></div></div>
                 </div>
+                <div class="xp-protocol-item selected" data-protocol="vless_xhttp">
+                    <div class="xp-protocol-header">
+                        <div class="xp-protocol-main"><div class="xp-protocol-icon">${SVG_ICONS.ladder}</div><div class="xp-protocol-name">VLESS XHTTP (非 TLS)</div></div>
+                        <div class="xp-protocol-actions">${renderCheckbox('vless_xhttp')}<button class="xp-toggle-btn" id="toggle-vless_xhttp">${SVG_ICONS.toggle}</button></div>
+                    </div>
+                    <div class="xp-info-panel" id="info-vless_xhttp"><div class="xp-info-content"><div class="xp-info-title">配置详情</div><div class="xp-info-list"><div class="xp-info-item">传输: XHTTP</div><div class="xp-info-item">安全: none</div></div></div></div>
+                </div>
+                <div class="xp-protocol-item ${tlsDisabled ? 'disabled' : 'selected'}" data-protocol="vless_xhttp_tls">
+                    <div class="xp-protocol-header">
+                        <div class="xp-protocol-main"><div class="xp-protocol-icon">${SVG_ICONS.ladder}</div><div class="xp-protocol-name">VLESS XHTTP (TLS)</div></div>
+                        <div class="xp-protocol-actions">${renderCheckbox('vless_xhttp_tls', !tlsDisabled, tlsDisabled)}<button class="xp-toggle-btn" id="toggle-vless_xhttp_tls">${SVG_ICONS.toggle}</button></div>
+                    </div>
+                    <div class="xp-info-panel" id="info-vless_xhttp_tls"><div class="xp-info-content"><div class="xp-info-title">配置详情</div><div class="xp-info-list"><div class="xp-info-item">传输: XHTTP</div><div class="xp-info-item">安全: tls</div></div></div></div>
+                </div>
                 <div class="xp-protocol-item selected" data-protocol="vless_xhttp_enc">
                     <div class="xp-protocol-header">
                         <div class="xp-protocol-main"><div class="xp-protocol-icon">${SVG_ICONS.ladder}</div><div class="xp-protocol-name">VLESS XHTTP Encryption (Post-Quantum) (非 TLS)</div></div>
@@ -3205,6 +3863,34 @@
                         <div class="xp-protocol-actions">${renderCheckbox('hysteria2', !tlsDisabled, tlsDisabled)}<button class="xp-toggle-btn" id="toggle-hysteria2">${SVG_ICONS.toggle}</button></div>
                     </div>
                     <div class="xp-info-panel" id="info-hysteria2"><div class="xp-info-content"><div class="xp-info-title">配置详情</div><div class="xp-info-list"><div class="xp-info-item">链接: hysteria2://</div><div class="xp-info-item">安全: tls</div><div class="xp-info-item">认证: auth password</div></div></div></div>
+                </div>
+                <div class="xp-protocol-item selected" data-protocol="http_noauth">
+                    <div class="xp-protocol-header">
+                        <div class="xp-protocol-main"><div class="xp-protocol-icon">${SVG_ICONS.ladder}</div><div class="xp-protocol-name">HTTP (无账号密码)</div></div>
+                        <div class="xp-protocol-actions">${renderCheckbox('http_noauth')}<button class="xp-toggle-btn" id="toggle-http_noauth">${SVG_ICONS.toggle}</button></div>
+                    </div>
+                    <div class="xp-info-panel" id="info-http_noauth"><div class="xp-info-content"><div class="xp-info-title">配置详情</div><div class="xp-info-list"><div class="xp-info-item">协议: http</div><div class="xp-info-item">认证: noauth</div></div></div></div>
+                </div>
+                <div class="xp-protocol-item selected" data-protocol="http_auth">
+                    <div class="xp-protocol-header">
+                        <div class="xp-protocol-main"><div class="xp-protocol-icon">${SVG_ICONS.ladder}</div><div class="xp-protocol-name">HTTP (账号密码)</div></div>
+                        <div class="xp-protocol-actions">${renderCheckbox('http_auth')}<button class="xp-toggle-btn" id="toggle-http_auth">${SVG_ICONS.toggle}</button></div>
+                    </div>
+                    <div class="xp-info-panel" id="info-http_auth"><div class="xp-info-content"><div class="xp-info-title">配置详情</div><div class="xp-info-list"><div class="xp-info-item">协议: http</div><div class="xp-info-item">认证: settings.accounts</div></div></div></div>
+                </div>
+                <div class="xp-protocol-item selected" data-protocol="mixed_noauth">
+                    <div class="xp-protocol-header">
+                        <div class="xp-protocol-main"><div class="xp-protocol-icon">${SVG_ICONS.ladder}</div><div class="xp-protocol-name">MIXED (无账号密码)</div></div>
+                        <div class="xp-protocol-actions">${renderCheckbox('mixed_noauth')}<button class="xp-toggle-btn" id="toggle-mixed_noauth">${SVG_ICONS.toggle}</button></div>
+                    </div>
+                    <div class="xp-info-panel" id="info-mixed_noauth"><div class="xp-info-content"><div class="xp-info-title">配置详情</div><div class="xp-info-list"><div class="xp-info-item">协议: mixed</div><div class="xp-info-item">链接: socks5://</div></div></div></div>
+                </div>
+                <div class="xp-protocol-item selected" data-protocol="mixed_auth">
+                    <div class="xp-protocol-header">
+                        <div class="xp-protocol-main"><div class="xp-protocol-icon">${SVG_ICONS.ladder}</div><div class="xp-protocol-name">MIXED (账号密码)</div></div>
+                        <div class="xp-protocol-actions">${renderCheckbox('mixed_auth')}<button class="xp-toggle-btn" id="toggle-mixed_auth">${SVG_ICONS.toggle}</button></div>
+                    </div>
+                    <div class="xp-info-panel" id="info-mixed_auth"><div class="xp-info-content"><div class="xp-info-title">配置详情</div><div class="xp-info-list"><div class="xp-info-item">协议: mixed</div><div class="xp-info-item">链接: socks5://</div><div class="xp-info-item">认证: settings.accounts</div></div></div></div>
                 </div>
                 <div class="xp-protocol-item selected" data-protocol="ss_blake3_chacha20_poly1305">
                     <div class="xp-protocol-header">
